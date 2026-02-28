@@ -1,0 +1,40 @@
+# ──────────────────────────────────────────────
+# Generated with:  uv pip compile pyproject.toml -o requirements.txt
+# Regenerate whenever pyproject.toml changes.
+# ──────────────────────────────────────────────
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+
+# Database
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+alembic>=1.14.0
+
+# Validation & config
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# Cache / queues
+redis[hiredis]>=5.2.0
+celery[redis]>=5.4.0
+
+# Auth & security — Argon2 (NOT bcrypt)
+python-jose[cryptography]>=3.3.0
+argon2-cffi>=23.1.0
+cryptography>=44.0.0
+pyotp>=2.9.0
+
+# Storage
+aioboto3>=13.0.0
+
+# Logging
+structlog>=24.4.0
+
+# HTTP client
+httpx>=0.28.0
+
+# Utilities
+python-slugify>=8.0.4
