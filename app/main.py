@@ -103,6 +103,8 @@ def _register_routers(app: FastAPI) -> None:
 
     # from app.modules.files.router import router as files_router
     # app.include_router(files_router, prefix="/api/v1/files", tags=["Files"])
+    from app.modules.files.router import router as files_router
+    app.include_router(files_router, prefix="/api/v1/files", tags=["Files"])
 
     from app.modules.api_management.router import router as api_mgmt_router
     app.include_router(api_mgmt_router, prefix="/api/v1", tags=["API Management"])

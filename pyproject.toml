@@ -33,6 +33,7 @@ dependencies = [
     "python-slugify>=8.0.4",
     "authlib>=1.6.8",
     "stripe>=14.4.0",
+    "python-magic>=0.4.27",
 ]
 
 [project.optional-dependencies]

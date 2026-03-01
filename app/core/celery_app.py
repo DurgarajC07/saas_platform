@@ -21,7 +21,7 @@ celery_app = Celery(
     "saas_platform",
     broker=_settings.REDIS_URL,
     backend=_settings.REDIS_URL,
-    include=["app.tasks.webhook", "app.tasks.notifications"],
+    include=["app.tasks.webhook", "app.tasks.notifications", "app.tasks.files"],
 )
 
 celery_app.conf.update(
