@@ -16,6 +16,7 @@ from app.core.middleware.logging import LoggingMiddleware
 from app.core.middleware.request_id import RequestIDMiddleware
 from app.core.middleware.tenant_context import TenantContextMiddleware
 from app.core.middleware.ip_block import IPBlockMiddleware
+from app.core.middleware.metrics import PrometheusMiddleware
 
 
 def create_application() -> FastAPI:
@@ -34,6 +35,7 @@ def create_application() -> FastAPI:
     # ── Middleware ─────────────────────────────────────────────────────────
     # Registered in reverse order: last-added = first-executed at request time.
     # Execution order: RequestID → IPBlock → Logging → TenantContext → route handler
+    application.add_middleware(PrometheusMiddleware)
     application.add_middleware(TenantContextMiddleware)
     application.add_middleware(LoggingMiddleware)
     application.add_middleware(IPBlockMiddleware)
@@ -108,6 +110,9 @@ def _register_routers(app: FastAPI) -> None:
 
     from app.modules.api_management.router import router as api_mgmt_router
     app.include_router(api_mgmt_router, prefix="/api/v1", tags=["API Management"])
+
+    from app.modules.system.router import router as system_router
+    app.include_router(system_router, prefix="/api/v1", tags=["System"])
 
 
 app = create_application()
