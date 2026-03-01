@@ -7,6 +7,7 @@ The module-level ``app`` binding is the ASGI entry point used by uvicorn.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import get_settings
 from app.core import all_models  # noqa: F401 — register all ORM models at import time
@@ -14,6 +15,7 @@ from app.core.events import lifespan
 from app.core.exception_handlers import register_exception_handlers
 from app.core.middleware.logging import LoggingMiddleware
 from app.core.middleware.request_id import RequestIDMiddleware
+from app.core.middleware.security_headers import SecurityHeadersMiddleware
 from app.core.middleware.tenant_context import TenantContextMiddleware
 from app.core.middleware.ip_block import IPBlockMiddleware
 from app.core.middleware.metrics import PrometheusMiddleware
@@ -34,7 +36,9 @@ def create_application() -> FastAPI:
 
     # ── Middleware ─────────────────────────────────────────────────────────
     # Registered in reverse order: last-added = first-executed at request time.
-    # Execution order: RequestID → IPBlock → Logging → TenantContext → route handler
+    # Execution order (outermost→innermost):
+    #   SecurityHeaders → GZip → CORS → RequestID → IPBlock → Logging
+    #   → TenantContext → Prometheus → route handler
     application.add_middleware(PrometheusMiddleware)
     application.add_middleware(TenantContextMiddleware)
     application.add_middleware(LoggingMiddleware)
@@ -46,6 +50,15 @@ def create_application() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    # GZip compresses responses larger than 1 KB — saves bandwidth without
+    # any application-level work.
+    application.add_middleware(GZipMiddleware, minimum_size=1024)
+    # SecurityHeaders is outermost: every response — including error payloads
+    # and redirects — gets the hardening headers.
+    application.add_middleware(
+        SecurityHeadersMiddleware,
+        is_production=settings.is_production,
     )
 
     # ── Routers ────────────────────────────────────────────────────────────

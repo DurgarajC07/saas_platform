@@ -38,6 +38,12 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rate_limit import (
+    ForgotPasswordLimit,
+    LoginRateLimit,
+    RefreshTokenLimit,
+    RegisterRateLimit,
+)
 from app.modules.auth.dependencies import (
     AuthDeps,
     get_current_session_id,
@@ -80,6 +86,7 @@ router = APIRouter()
     response_model=UserResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new account",
+    dependencies=[Depends(RegisterRateLimit)],
 )
 async def register(
     data: RegisterRequest,
@@ -120,6 +127,7 @@ async def verify_email(
         200: {"model": TokenResponse, "description": "Successful login — token pair returned"},
         202: {"model": TwoFactorChallengeResponse, "description": "2FA required"},
     },
+    dependencies=[Depends(LoginRateLimit)],
 )
 async def login(
     data: LoginRequest,
@@ -146,6 +154,7 @@ async def login(
     response_model=TokenResponse,
     include_in_schema=False,  # OpenAPI /docs "Try it out" needs form-encoded login
     summary="Login (form-encoded, for Swagger UI)",
+    dependencies=[Depends(LoginRateLimit)],
 )
 async def login_form(
     form: Annotated[OAuth2PasswordRequestForm, Depends()],
@@ -170,6 +179,7 @@ async def login_form(
     "/refresh",
     response_model=TokenResponse,
     summary="Rotate refresh token",
+    dependencies=[Depends(RefreshTokenLimit)],
 )
 async def refresh(
     data: RefreshRequest,
@@ -214,6 +224,7 @@ async def logout(
     "/forgot-password",
     response_model=MessageResponse,
     summary="Request a password-reset link",
+    dependencies=[Depends(ForgotPasswordLimit)],
 )
 async def forgot_password(
     data: ForgotPasswordRequest,
