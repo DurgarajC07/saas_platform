@@ -1,0 +1,11 @@
+kokoro>=0.9.4
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+structlog>=24.4.0
+soundfile>=0.12.1
+numpy>=1.26.0
+# PyTorch CPU-only wheel via the official CPU index.
+# "+cpu" local version labels are only valid with == / != — not >= — so we
+# use --extra-index-url to pull the CPU build without the +cpu suffix hack.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.3.0

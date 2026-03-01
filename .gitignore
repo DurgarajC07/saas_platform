@@ -6,6 +6,7 @@ build/
 .eggs/
 *.egg
 .env
+.env.ai
 .venv/
 venv/
 env/
