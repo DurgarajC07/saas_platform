@@ -79,6 +79,9 @@ class AuthService:
         self.attempt_repo = LoginAttemptRepository(session)
         self.session = session
         self.redis = redis
+        # Lazy import avoids circular dependency
+        from app.modules.security.service import SecurityService  # noqa: PLC0415
+        self.security_svc = SecurityService(session, redis)
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
@@ -256,6 +259,7 @@ class AuthService:
                 is_success=False,
                 failure_reason="invalid_credentials",
             )
+            await self.security_svc.check_and_autoblock(ip)
             await self.session.commit()
             raise UnauthorizedException("Invalid email or password")
 

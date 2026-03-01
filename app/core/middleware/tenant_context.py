@@ -42,6 +42,17 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         if any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES):
             return await call_next(request)
 
+        # 1. Explicit header takes priority — allows multi-org users to switch context
+        header_org_id = request.headers.get("X-Organization-ID")
+        if header_org_id:
+            try:
+                request.state.org_id = UUID(header_org_id)
+                structlog.contextvars.bind_contextvars(org_id=header_org_id)
+                return await call_next(request)
+            except ValueError:
+                logger.warning("Invalid X-Organization-ID header value", value=header_org_id)
+
+        # 2. Fall back to org_id embedded in the JWT payload
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header.removeprefix("Bearer ")

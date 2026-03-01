@@ -77,6 +77,22 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "SaaS Platform"
     SMTP_TLS: bool = False
 
+    # ── Billing / Payment ──────────────────────────────────────────────────
+    BILLING_PROVIDER: str = "stripe"  # stripe | razorpay | none
+
+    # Stripe
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+
+    # Razorpay
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+
+    # Subscription cache (seconds)
+    SUBSCRIPTION_CACHE_TTL: int = 300
+
     # ── Frontend ───────────────────────────────────────────────────────────
     FRONTEND_URL: str = "http://localhost:3000"
 
@@ -89,9 +105,9 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
 
-    # Microsoft
-    MICROSOFT_CLIENT_ID: str = ""
-    MICROSOFT_CLIENT_SECRET: str = ""
+    # # Microsoft
+    # MICROSOFT_CLIENT_ID: str = ""
+    # MICROSOFT_CLIENT_SECRET: str = ""
 
     # Base URL used to build OAuth2 redirect URIs (e.g. https://api.example.com)
     OAUTH_REDIRECT_BASE_URL: str = "http://localhost:8000"

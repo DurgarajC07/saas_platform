@@ -32,6 +32,7 @@ dependencies = [
     # Utilities
     "python-slugify>=8.0.4",
     "authlib>=1.6.8",
+    "stripe>=14.4.0",
 ]
 
 [project.optional-dependencies]
