@@ -41,6 +41,7 @@ import soundfile as sf
 import structlog
 import websockets
 import websockets.asyncio.client as ws_client
+from metrics import get_metrics
 from pipecat.frames.frames import (
     AudioRawFrame,
     EndFrame,
@@ -253,6 +254,9 @@ class KokoroTTSProcessor(FrameProcessor):
                                 ttfb_ms=round(ttfb_ms, 1),
                                 chars=len(text),
                             )
+                            _m = get_metrics()
+                            if _m is not None:
+                                _m.record_tts_ttfb_ms(ttfb_ms)
                             first_audio = False
 
                         if self._recorder is not None:

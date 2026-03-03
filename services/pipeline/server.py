@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse
 
 from schemas import AgentConfig, HealthResponse, SessionCreateRequest, SessionInfo
 from session_manager import SessionManager
+from metrics import init_metrics, get_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     logger.info("pipeline.startup")
     _session_manager = SessionManager()
     await _session_manager.startup()
+    init_metrics(max_concurrent_calls=SessionManager.MAX_CONCURRENT_CALLS)
     logger.info("pipeline.ready")
     yield
     logger.info("pipeline.shutdown")
@@ -78,6 +80,31 @@ async def health() -> HealthResponse:
     """Liveness probe — always 200 once startup completes."""
     active = _session_manager.active_count() if _session_manager else 0
     return HealthResponse(status="ok", sessions_active=active)
+
+
+@app.get("/metrics", tags=["System"], summary="Pipeline latency and capacity metrics")
+async def pipeline_metrics() -> dict:
+    """
+    Return a real-time snapshot of pipeline performance.
+
+    Fields
+    ------
+    sessions_active        — number of live WS sessions right now
+    max_concurrent_calls   — hard cap (``SessionManager.MAX_CONCURRENT_CALLS``)
+    avg_vad_ms             — rolling average VAD inference time per audio frame
+    avg_stt_ms             — rolling average STT round-trip (audio upload → transcript)
+    avg_llm_ttft_ms        — rolling average LLM time-to-first-token
+    avg_tts_ttfb_ms        — rolling average TTS first-audio latency
+    avg_e2e_ms             — rolling average end-to-end session duration
+    p95_e2e_ms             — p95 end-to-end latency over the last 50 calls
+    gpu_utilization_pct    — GPU core utilization on device 0 (None if unavailable)
+    total_calls_served     — lifetime calls since process start
+    uptime_s               — seconds since process started
+    """
+    m = get_metrics()
+    if m is None:
+        raise HTTPException(status_code=503, detail="Metrics not available")
+    return m.snapshot().to_dict()
 
 
 @app.get("/info", tags=["System"])

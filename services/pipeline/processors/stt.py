@@ -32,6 +32,7 @@ from typing import Any
 import structlog
 import websockets
 import websockets.asyncio.client as ws_client
+from metrics import get_metrics
 from pipecat.frames.frames import (
     AudioRawFrame,
     EndFrame,
@@ -202,6 +203,9 @@ class WhisperSTTProcessor(FrameProcessor):
                     latency_ms=latency_ms,
                     server_elapsed_ms=result.get("elapsed_ms"),
                 )
+                _m = get_metrics()
+                if _m is not None:
+                    _m.record_stt_ms(float(latency_ms))
                 await self.push_frame(
                     TranscriptionFrame(
                         text=text,

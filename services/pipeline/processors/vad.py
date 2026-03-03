@@ -29,9 +29,11 @@ sample_rate     : int    expected PCM sample rate (default 16 000 Hz)
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
+from metrics import get_metrics
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
@@ -110,7 +112,12 @@ class SileroVADProcessor(FrameProcessor):
     # ── Internal ─────────────────────────────────────────────────────────────
 
     async def _handle_audio(self, frame: AudioRawFrame) -> None:
+        t0 = time.perf_counter()
         new_state: VADState = self._vad.analyze_audio(frame.audio)
+        vad_ms = (time.perf_counter() - t0) * 1000
+        _m = get_metrics()
+        if _m is not None:
+            _m.record_vad_ms(vad_ms)
 
         # ---------- speech onset ----------
         if new_state in (VADState.STARTING, VADState.SPEAKING) and not self._speaking:

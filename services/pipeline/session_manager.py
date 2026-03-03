@@ -20,6 +20,8 @@ as isolated ``asyncio.Task`` objects; each task is tracked and cancelled on
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict
@@ -30,11 +32,33 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 
 from call_recorder import CallRecorder
+from metrics import get_metrics
 from pipeline_builder import PipelineBuilder
 from schemas import AgentConfig, SessionInfo, LANGUAGE_VOICE_MAP
 from transports.websocket import make_ws_transport
 
 log: structlog.BoundLogger = structlog.get_logger(__name__)
+
+_BUSY_TEXT = "All agents are currently busy. Please try again in a moment."
+
+
+async def _send_busy_response(ws: WebSocket) -> None:
+    """
+    Accept the WebSocket, deliver a capacity-exceeded event, and close.
+
+    The client receives:
+    * A JSON text frame: ``{"event": "busy", "detail": "<message>"}``
+    * WebSocket close code 1008 (Policy Violation)
+    """
+    try:
+        await ws.send_text(json.dumps({"event": "busy", "detail": _BUSY_TEXT}))
+    except Exception:
+        pass
+    finally:
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
 
 
 class _SessionState:
@@ -74,6 +98,9 @@ class SessionManager:
     cleanly shut down via ``shutdown()`` so that all in-flight sessions are
     gracefully terminated.
     """
+
+    #: Hard cap on simultaneous active calls — tuned for RTX 4060 (8 GB VRAM).
+    MAX_CONCURRENT_CALLS: int = 3
 
     def __init__(self) -> None:
         self._sessions: Dict[str, _SessionState] = {}
@@ -198,7 +225,11 @@ class SessionManager:
 
     def active_count(self) -> int:
         """Return the number of sessions currently in the registry."""
-        return len(self._sessions)
+        count = len(self._sessions)
+        _m = get_metrics()
+        if _m is not None:
+            _m.set_active_sessions(count)
+        return count
 
     # ------------------------------------------------------------------
     # WebSocket runner
@@ -222,6 +253,22 @@ class SessionManager:
         if state is None:
             log.warning("run_ws_session_not_found", session_id=session_id)
             await ws.close(code=4404)
+            return
+
+        # ── Concurrency gate ──────────────────────────────────────────────────
+        # Count only *active* (pipeline-running) sessions, not idle/ended ones.
+        active_running = sum(
+            1 for s in self._sessions.values()
+            if s.info.status == "active"
+        )
+        if active_running >= self.MAX_CONCURRENT_CALLS:
+            log.warning(
+                "session_capacity_reached",
+                active=active_running,
+                max=self.MAX_CONCURRENT_CALLS,
+                session_id=session_id,
+            )
+            await _send_busy_response(ws)
             return
 
         state.info.status = "active"
@@ -292,6 +339,7 @@ class SessionManager:
         state.task = pipeline_task
 
         log.info("pipeline_task_started", session_id=session_id)
+        e2e_start = time.perf_counter()
         try:
             await pipeline_task
         except asyncio.CancelledError:
@@ -304,6 +352,10 @@ class SessionManager:
                 exc_info=True,
             )
         finally:
+            e2e_ms = (time.perf_counter() - e2e_start) * 1000
+            _m = get_metrics()
+            if _m is not None:
+                _m.record_e2e_ms(e2e_ms)
             state.info.status = "ended"
             if recorder:
                 try:

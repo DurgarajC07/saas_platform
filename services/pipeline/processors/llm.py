@@ -33,6 +33,7 @@ from typing import Any
 
 import aiohttp
 import structlog
+from metrics import get_metrics
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
@@ -249,6 +250,9 @@ class OllamaLLMProcessor(FrameProcessor):
                                 "ollama_llm.first_token",
                                 ttfb_ms=first_token_ms,
                             )
+                            _m = get_metrics()
+                            if _m is not None:
+                                _m.record_llm_ttft_ms(first_token_ms)
                         token_count += 1
                         full_response += token
                         text_buf      += token
