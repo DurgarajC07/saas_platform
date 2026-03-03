@@ -31,7 +31,17 @@ numpy>=1.26.0
 websockets>=13.0.0
 soundfile>=0.12.1
 
+# ── Noise removal ───────────────────────────────────────────────────────────────
+# Both noise processors fail-open when their library is absent.
+# Install optionally via Dockerfile build args (see Dockerfile for details).
+#   Stage 1 RNNoise:      --build-arg INSTALL_RNNOISE=1        (~1 MB)
+#   Stage 2 DeepFilterNet:--build-arg INSTALL_DEEPFILTERNET=1  (~750 MB, pulls PyTorch)
+
 # ── Logging / validation ──────────────────────────────────────────────────────
 structlog>=24.4.0
 pydantic>=2.10.0
 pydantic-settings>=2.6.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.24.0

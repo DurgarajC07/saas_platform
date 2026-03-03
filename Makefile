@@ -160,6 +160,10 @@ pipeline-test: ## Smoke-test the pipeline REST + WebSocket endpoints
 	$(eval WSTEST_PYTHON := $(shell command -v python3 || command -v python))
 	$(WSTEST_PYTHON) scripts/smoke_test_pipeline.py
 
+pipeline-unit-test: ## Run VAD / noise / interruption unit tests inside the pipeline container
+	@echo "Running pipeline unit tests inside container..."
+	$(INFRA_COMPOSE) exec pipeline python -m pytest tests/ -v --tb=short
+
 # ── NVIDIA Docker runtime setup ───────────────────────────────────────────────
 
 nvidia-docker-setup: ## Install and configure NVIDIA Container Toolkit for Docker (run as sudo if needed)

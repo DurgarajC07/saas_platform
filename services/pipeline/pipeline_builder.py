@@ -9,7 +9,10 @@ per session:
   transport.input()
       │
       ▼
-  [DeepFilterNetProcessor]   if noise_removal_enabled
+  [RNNoiseProcessor]         if noise_removal_level != none  (Stage 1, < 1 ms)
+      │
+      ▼
+  [DeepFilterNetProcessor]   if noise_removal_level == deepfilternet  (Stage 2, ~5 ms)
       │
       ▼
   [SileroVADProcessor]       if agent_type != speaker_only
@@ -43,17 +46,17 @@ from __future__ import annotations
 
 import structlog
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketTransport
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
 
 from processors.interrupt import InterruptionHandler
 from processors.llm import OllamaLLMProcessor
-from processors.noise import DeepFilterNetProcessor
+from processors.noise import DeepFilterNetProcessor, RNNoiseProcessor
 from processors.rag import RAGRetrievalProcessor
 from processors.stt import WhisperSTTProcessor
 from processors.tools import ToolExecutorProcessor
 from processors.tts import KokoroTTSProcessor
 from processors.vad import SileroVADProcessor
-from schemas import AgentConfig, AgentType
+from schemas import AgentConfig, AgentType, NoiseRemovalLevel
 
 log: structlog.BoundLogger = structlog.get_logger(__name__)
 
@@ -96,10 +99,16 @@ class PipelineBuilder:
         cfg = self._cfg
         processors: list = [transport.input()]
 
-        # ── 1. Noise removal ──────────────────────────────────────────
-        if cfg.noise_removal_enabled:
-            processors.append(DeepFilterNetProcessor())
-            log.debug("pipeline_slot_enabled", slot="noise_removal")
+        # ── 1. Noise removal (two-stage, level-gated) ─────────────────────────
+        if cfg.noise_removal_level != NoiseRemovalLevel.NONE:
+            # Stage 1 — RNNoise is always included when noise removal is active
+            processors.append(RNNoiseProcessor())
+            log.debug("pipeline_slot_enabled", slot="noise_rnnoise")
+
+            # Stage 2 — DeepFilterNet added only at the highest quality level
+            if cfg.noise_removal_level == NoiseRemovalLevel.DEEPFILTERNET:
+                processors.append(DeepFilterNetProcessor())
+                log.debug("pipeline_slot_enabled", slot="noise_deepfilternet")
 
         # ── 2. VAD (skipped for speaker_only — agent just plays audio) ─
         if cfg.agent_type != AgentType.SPEAKER_ONLY:
@@ -154,12 +163,16 @@ class PipelineBuilder:
 
         # ── 7. Interruption handler ───────────────────────────────────
         processors.append(
-            InterruptionHandler(enabled=cfg.allow_interruptions)
+            InterruptionHandler(
+                enabled=cfg.allow_interruptions,
+                barge_in_threshold=cfg.barge_in_threshold,
+            )
         )
         log.debug(
             "pipeline_slot_enabled",
             slot="interruption",
             allow=cfg.allow_interruptions,
+            barge_in_threshold=cfg.barge_in_threshold,
         )
 
         # ── 8. TTS ───────────────────────────────────────────────────

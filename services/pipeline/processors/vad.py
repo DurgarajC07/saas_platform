@@ -1,26 +1,30 @@
 """
-SileroVADProcessor — AudioRawFrame → speech-segmented AudioRawFrame.
+SileroVADProcessor — AudioRawFrame → speech-segmented frames.
 
-Wraps pipecat's built-in SileroVADAnalyzer (which uses onnxruntime to run the
-Silero v5 ONNX model) to segment a continuous audio stream into discrete
-speech utterances.
+Wraps pipecat's built-in SileroVADAnalyzer (Silero v5, onnxruntime) to segment
+a continuous raw-PCM stream into discrete speech utterances.
 
 Frame flow
 ----------
-AudioRawFrame (continuous)
+AudioRawFrame (continuous stream)
     ↓  SileroVADProcessor
-UserStartedSpeakingFrame  — emitted when speech probability crosses threshold
-AudioRawFrame             — forwarded only during active speech
-UserStoppedSpeakingFrame  — emitted when silence exceeds `silence_ms`
+UserStartedSpeakingFrame  — emitted once when speech probability crosses threshold
+AudioRawFrame             — forwarded only during confirmed speech windows
+UserStoppedSpeakingFrame  — emitted once when trailing silence exceeds ``silence_ms``
 
-WhisperSTTProcessor listens for UserStoppedSpeakingFrame to trigger flush.
+VAD state machine
+-----------------
+QUIET → STARTING  : speech onset detected  → emit UserStartedSpeakingFrame
+STARTING → SPEAKING : speech confirmed     → keep forwarding audio
+SPEAKING → STOPPING : trailing silence     → emit UserStoppedSpeakingFrame
+STOPPING → QUIET  : cooldown complete      → ready for next utterance
 
-Parameters
-----------
-threshold        : float  speech probability threshold (default 0.5)
-min_speech_ms    : int    minimum duration to classify as speech (default 250ms)
-silence_ms       : int    trailing silence before UserStoppedSpeakingFrame (default 800ms)
-sample_rate      : int    audio sample rate expected by Silero (16000)
+Parameters (all read from AgentConfig)
+---------------------------------------
+vad_threshold   : float  speech probability threshold (0.1–0.95, default 0.5)
+min_speech_ms   : int    minimum speech duration to confirm onset (default 250 ms)
+silence_ms      : int    trailing silence to confirm end of utterance (default 800 ms)
+sample_rate     : int    expected PCM sample rate (default 16 000 Hz)
 """
 
 from __future__ import annotations
@@ -48,16 +52,35 @@ class SileroVADProcessor(FrameProcessor):
     """
     Voice Activity Detection using the Silero v5 ONNX model.
 
-    Emits ``UserStartedSpeakingFrame`` and ``UserStoppedSpeakingFrame``
-    events; forwards ``AudioRawFrame`` only during confirmed speech.
+    Emits ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame`` events
+    and forwards ``AudioRawFrame`` only during confirmed speech windows.
+    All parameters are read from ``AgentConfig`` so behaviour is tunable
+    per-agent without code changes.
+
+    Parameters
+    ----------
+    vad_threshold :
+        Speech probability score (0.0–1.0) above which audio is considered
+        speech.  Lower values capture quieter or accented voices but raise
+        false-positive rate.  Default ``0.5``.
+    min_speech_ms :
+        Minimum consecutive milliseconds of detected speech before emitting
+        ``UserStartedSpeakingFrame``.  Filters out click-sounds and typing.
+        Default ``250`` ms.
+    silence_ms :
+        Silence duration (ms) after speech before ``UserStoppedSpeakingFrame``
+        is emitted.  Longer values tolerate mid-sentence pauses; shorter values
+        improve turn-taking latency.  Default ``800`` ms.
+    sample_rate :
+        PCM sample rate expected by the model.  Silero v5 requires 16 000 Hz.
     """
 
     def __init__(
         self,
-        threshold: float     = 0.5,
-        min_speech_ms: int   = 250,
-        silence_ms: int      = 800,
-        sample_rate: int     = 16000,
+        vad_threshold: float   = 0.5,
+        min_speech_ms: int     = 250,
+        silence_ms: int        = 800,
+        sample_rate: int       = 16_000,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -65,13 +88,13 @@ class SileroVADProcessor(FrameProcessor):
         self._speaking    = False
         self._log = logger.bind(processor="SileroVAD")
 
-        # Pipecat's built-in Silero wrapper
         self._vad = SileroVADAnalyzer(
+            sample_rate=sample_rate,
             params=VADParams(
-                confidence=threshold,
+                confidence=vad_threshold,
                 start_secs=min_speech_ms / 1000.0,
-                stop_secs=silence_ms / 1000.0,
-            )
+                stop_secs=silence_ms   / 1000.0,
+            ),
         )
 
     # ── Frame processing ─────────────────────────────────────────────────────
@@ -81,10 +104,6 @@ class SileroVADProcessor(FrameProcessor):
 
         if isinstance(frame, AudioRawFrame):
             await self._handle_audio(frame)
-
-        elif isinstance(frame, (StartFrame, EndFrame)):
-            await self.push_frame(frame, direction)
-
         else:
             await self.push_frame(frame, direction)
 
@@ -93,16 +112,18 @@ class SileroVADProcessor(FrameProcessor):
     async def _handle_audio(self, frame: AudioRawFrame) -> None:
         new_state: VADState = self._vad.analyze_audio(frame.audio)
 
-        if new_state == VADState.STARTING and not self._speaking:
+        # ---------- speech onset ----------
+        if new_state in (VADState.STARTING, VADState.SPEAKING) and not self._speaking:
             self._speaking = True
             self._log.debug("vad.speech_started")
             await self.push_frame(UserStartedSpeakingFrame())
 
-        elif new_state == VADState.STOPPING and self._speaking:
+        # ---------- speech end ----------
+        elif new_state in (VADState.STOPPING, VADState.QUIET) and self._speaking:
             self._speaking = False
             self._log.debug("vad.speech_stopped")
             await self.push_frame(UserStoppedSpeakingFrame())
 
-        # Forward audio frame downstream only while speech is active
+        # Forward audio downstream only while speech is confirmed
         if self._speaking:
             await self.push_frame(frame)

@@ -23,10 +23,24 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class AgentType(str, Enum):
-    SPEAKER_ONLY  = "speaker_only"
+    SPEAKER_ONLY   = "speaker_only"
     CONVERSATIONAL = "conversational"
     RAG_BOT        = "rag_bot"
     TOOL_BOT       = "tool_bot"
+
+
+class NoiseRemovalLevel(str, Enum):
+    """
+    Two-stage noise removal level.
+
+    none          — raw audio forwarded unchanged (lowest latency)
+    rnnoise       — Stage 1: RNNoise RNN denoiser, < 1 ms/frame (default)
+    deepfilternet — Stage 1 + Stage 2: RNNoise + DeepFilterNet3 (best quality,
+                    adds ~5 ms; recommended for call-centre / outdoor agents)
+    """
+    NONE          = "none"
+    RNNOISE       = "rnnoise"
+    DEEPFILTERNET = "deepfilternet"
 
 
 class AgentConfig(BaseModel):
@@ -70,9 +84,12 @@ class AgentConfig(BaseModel):
     rag_top_k: int          = Field(default=3, ge=1, le=10)
     qdrant_url: str         = Field(default="http://qdrant:6333")
 
-    # ── Feature flags ─────────────────────────────────────────────────────────
-    noise_removal_enabled: bool  = False
+    # ── Noise removal ─────────────────────────────────────────────────────────
+    noise_removal_level: NoiseRemovalLevel = NoiseRemovalLevel.RNNOISE
+
+    # ── Interruption / barge-in ───────────────────────────────────────────────
     allow_interruptions: bool    = True
+    barge_in_threshold: float    = Field(default=0.3, ge=0.0, le=1.0)
 
     @field_validator("agent_type", mode="before")
     @classmethod

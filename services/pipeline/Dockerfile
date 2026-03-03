@@ -22,9 +22,19 @@ WORKDIR /app
 RUN python -m venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
+ARG INSTALL_DEEPFILTERNET=0
+ARG INSTALL_RNNOISE=0
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
+ && pip install --no-cache-dir -r requirements.txt \
+    # Stage 1 noise removal: RNNoise (<1 ms, ~1 MB)
+ && if [ "${INSTALL_RNNOISE:-0}" = "1" ]; then \
+        pip install --no-cache-dir rnnoise-python; \
+    fi \
+    # Stage 2 noise removal: DeepFilterNet (~5 ms, pulls PyTorch ~750 MB)
+ && if [ "${INSTALL_DEEPFILTERNET:-0}" = "1" ]; then \
+        pip install --no-cache-dir deepfilternet; \
+    fi
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
