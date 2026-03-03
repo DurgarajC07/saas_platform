@@ -16,7 +16,9 @@ tool_bot           — conversational + function/API tool execution
 
 from __future__ import annotations
 
+from datetime import date
 from enum import Enum
+from string import Formatter
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -60,6 +62,61 @@ LANGUAGE_VOICE_MAP: dict[str, str] = {
 }
 
 
+
+# -- Prompt template helpers ---------------------------------------------------
+
+class PromptContext(BaseModel):
+    """
+    Runtime variables resolved into the agent's system prompt template.
+
+    Each field maps to a {placeholder} in the prompt text. Unknown
+    placeholders are left unchanged (safe substitution).
+
+    Example template usage
+    ----------------------
+    "You are {agent_name}, an assistant for {org_name}. Today is {today}.
+    Respond in {language}. Keep answers under {max_words} words."
+    """
+    agent_name:          str = "Assistant"
+    org_name:            str = "the organization"
+    caller_name:         str = "the caller"
+    language:            str = "English"
+    max_words:           int = 150
+    today:               str = Field(default_factory=lambda: date.today().isoformat())
+    pricing_response:    str = ""
+    custom_instructions: str = ""
+
+
+def resolve_system_prompt(template: str, ctx: "PromptContext | None" = None) -> str:
+    """
+    Substitute {variable} placeholders in *template* using *ctx*.
+
+    Safe: placeholders with no matching PromptContext field are kept verbatim.
+
+    Parameters
+    ----------
+    template : str
+        Raw system prompt text, possibly containing {placeholder} tokens.
+    ctx : PromptContext | None
+        Variable values; if None the template is returned unchanged.
+
+    Returns
+    -------
+    str
+        Resolved system prompt string.
+    """
+    if ctx is None:
+        return template
+
+    values = ctx.model_dump()
+
+    class _SafeDict(dict):
+        def __missing__(self, key: str) -> str:
+            return "{" + key + "}"
+
+    return template.format_map(_SafeDict(values))
+
+
 class AgentConfig(BaseModel):
     """
     Full agent configuration loaded from the saas_platform database.
@@ -80,6 +137,8 @@ class AgentConfig(BaseModel):
     temperature: float      = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int         = Field(default=512,  ge=1, le=4096)
     tools_json: list[dict[str, Any]] | None = None  # OpenAI-compatible tool defs
+    max_turns: int                              = Field(default=20, ge=1, le=100)
+    prompt_context: PromptContext | None        = None   # Template vars resolved at call start
 
     # ── STT ───────────────────────────────────────────────────────────────────
     language: str | None    = None        # None = auto-detect

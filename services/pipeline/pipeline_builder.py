@@ -58,7 +58,7 @@ from processors.stt import WhisperSTTProcessor
 from processors.tools import ToolExecutorProcessor
 from processors.tts import KokoroTTSProcessor
 from processors.vad import SileroVADProcessor
-from schemas import AgentConfig, AgentType, NoiseRemovalLevel
+from schemas import AgentConfig, AgentType, NoiseRemovalLevel, resolve_system_prompt
 
 log: structlog.BoundLogger = structlog.get_logger(__name__)
 
@@ -167,15 +167,26 @@ class PipelineBuilder:
 
         # ── 5. LLM ───────────────────────────────────────────────────
         if cfg.agent_type != AgentType.SPEAKER_ONLY:
+            # Resolve system prompt template variables at session start time
+            resolved_prompt = resolve_system_prompt(
+                cfg.system_prompt or "", cfg.prompt_context
+            )
             processors.append(
                 OllamaLLMProcessor(
                     model=cfg.llm_model,
-                    system_prompt=cfg.system_prompt or "",
+                    system_prompt=resolved_prompt,
+                    tools=cfg.tools_json,
                     temperature=cfg.temperature,
                     max_tokens=cfg.max_tokens,
+                    max_turns=cfg.max_turns,
                 )
             )
-            log.debug("pipeline_slot_enabled", slot="llm", model=cfg.llm_model)
+            log.debug(
+                "pipeline_slot_enabled",
+                slot="llm",
+                model=cfg.llm_model,
+                max_turns=cfg.max_turns,
+            )
 
         # ── 6. Tool executor ─────────────────────────────────────────
         if cfg.tools_json:
