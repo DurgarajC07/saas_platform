@@ -2,7 +2,7 @@
         docker-up docker-down \
         infra-up infra-down infra-logs infra-ps infra-build infra-restart \
         nvidia-docker-setup \
-        whisper-test tts-test qdrant-test
+        whisper-test tts-test qdrant-test ws-test
 
 help: ## Show help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -118,6 +118,26 @@ qdrant-test: ## Smoke-test Qdrant — list collections
 	curl -s http://localhost:6333/healthz
 	@echo ""
 	curl -s http://localhost:6333/collections | python3 -m json.tool
+
+# ── WebSocket smoke tests ─────────────────────────────────────────────────────
+
+ws-test: ## Smoke-test WebSocket streaming endpoints (Whisper + Kokoro). Requires: pip install websockets numpy
+	@echo "Running WebSocket smoke tests..."
+	@echo "  Whisper WS: ws://localhost:9001/transcribe/stream"
+	@echo "  Kokoro  WS: ws://localhost:8881/tts/stream"
+	@echo ""
+	$(eval WSTEST_PYTHON := $(shell command -v python3 || command -v python))
+	@$(WSTEST_PYTHON) -c "import websockets" 2>/dev/null || \
+		{ echo "  [ERROR] websockets not installed — run: pip install websockets numpy"; exit 1; }
+	$(WSTEST_PYTHON) scripts/smoke_test_ws.py
+
+ws-test-whisper: ## Test only the Whisper WebSocket endpoint
+	$(eval WSTEST_PYTHON := $(shell command -v python3 || command -v python))
+	$(WSTEST_PYTHON) scripts/smoke_test_ws.py --whisper-only
+
+ws-test-kokoro: ## Test only the Kokoro WebSocket endpoint
+	$(eval WSTEST_PYTHON := $(shell command -v python3 || command -v python))
+	$(WSTEST_PYTHON) scripts/smoke_test_ws.py --kokoro-only
 
 # ── NVIDIA Docker runtime setup ───────────────────────────────────────────────
 

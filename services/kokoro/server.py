@@ -7,7 +7,8 @@ Designed to be called by the Pipecat pipeline — text chunk in, PCM/WAV out.
 Endpoints
 ---------
 POST /tts              Text → WAV audio bytes (blocking, full utterance)
-POST /tts/stream       Text → chunked WAV stream (sentence-by-sentence)
+POST /tts/stream       Text → chunked WAV stream (sentence-by-sentence, HTTP)
+WS   /tts/stream       WebSocket TTS: JSON request → WAV chunk stream → done JSON
 GET  /voices           List available voices grouped by language
 GET  /info             Runtime configuration
 GET  /health           Liveness probe
@@ -65,7 +66,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import structlog
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -356,10 +357,107 @@ async def tts(req: TTSRequest) -> Response:
     )
 
 
+@app.websocket("/tts/stream")
+async def tts_ws(ws: WebSocket) -> None:
+    """
+    WebSocket TTS endpoint used by the Pipecat pipeline.
+
+    Protocol
+    --------
+    Client → Server : JSON  request  (repeatable across the lifetime of the socket)
+
+        {"text": "Hello, how can I help you?",
+         "voice": "af_heart",   // optional, default: DEFAULT_VOICE env
+         "speed": 1.0,          // optional, float 0.25–3.0
+         "lang":  "a"           // optional, Kokoro lang_code
+        }
+
+    Server → Client : bytes  WAV audio segment (one per synthesised sentence chunk)
+    Server → Client : JSON  ``{"done": true, "chunks": N, "elapsed_ms": M}``
+                            after all audio for that request is sent
+    Server → Client : JSON  ``{"error": "..."}`` on failure (connection stays open)
+
+    The connection remains alive across multiple TTS requests until the
+    client closes it.  TTFB for the first audio chunk is typically < 100ms
+    for short utterances (< 50 chars).
+    """
+    await ws.accept()
+    remote = ws.client.host if ws.client else "unknown"
+    log = logger.bind(remote=remote)
+    log.info("kokoro.ws_connected")
+
+    try:
+        async for msg in ws.iter_json():
+            voice: str = msg.get("voice", _DEFAULT_VOICE)
+            speed: float = float(msg.get("speed", _DEFAULT_SPEED))
+            lang: str = msg.get("lang", _DEFAULT_LANG)
+            text: str = (msg.get("text") or "").strip()
+
+            if not text:
+                await ws.send_json({"error": "text is required and must not be empty"})
+                continue
+
+            try:
+                pipeline = _get_pipeline(lang)
+            except ValueError as exc:
+                await ws.send_json({"error": str(exc)})
+                continue
+
+            t0 = time.perf_counter()
+            chunks_sent: int = 0
+            first_chunk_logged: bool = False
+
+            try:
+                generator = pipeline(text, voice=voice, speed=speed)
+
+                for _graphemes, _phonemes, audio_chunk in generator:
+                    if audio_chunk is None or len(audio_chunk) == 0:
+                        continue
+
+                    audio = np.clip(np.asarray(audio_chunk, dtype=np.float32), -1.0, 1.0)
+                    chunk_wav = _numpy_to_wav(audio)
+                    await ws.send_bytes(chunk_wav)
+                    chunks_sent += 1
+
+                    if not first_chunk_logged:
+                        ttfb_ms = round((time.perf_counter() - t0) * 1000, 1)
+                        log.info(
+                            "kokoro.ws_first_chunk",
+                            voice=voice,
+                            lang=lang,
+                            ttfb_ms=ttfb_ms,
+                        )
+                        first_chunk_logged = True
+
+                elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+                log.info(
+                    "kokoro.ws_done",
+                    voice=voice,
+                    lang=lang,
+                    chars=len(text),
+                    chunks=chunks_sent,
+                    elapsed_ms=elapsed_ms,
+                )
+                await ws.send_json({
+                    "done": True,
+                    "chunks": chunks_sent,
+                    "elapsed_ms": elapsed_ms,
+                })
+
+            except Exception as exc:
+                log.exception("kokoro.ws_synthesis_error", voice=voice, error=str(exc))
+                await ws.send_json({"error": f"synthesis failed: {exc}"})
+
+    except WebSocketDisconnect:
+        log.info("kokoro.ws_disconnected")
+    except Exception as exc:
+        log.exception("kokoro.ws_error", error=str(exc))
+
+
 @app.post(
     "/tts/stream",
     tags=["TTS"],
-    summary="Stream TTS audio chunk-by-chunk (low latency)",
+    summary="Stream TTS audio chunk-by-chunk via HTTP (low latency)",
     responses={
         200: {
             "content": {"audio/wav": {}},
@@ -393,7 +491,7 @@ async def tts_stream(req: TTSRequest) -> StreamingResponse:
             if audio_chunk is None or len(audio_chunk) == 0:
                 continue
 
-            audio = np.clip(audio_chunk.astype(np.float32), -1.0, 1.0)
+            audio = np.clip(np.asarray(audio_chunk, dtype=np.float32), -1.0, 1.0)
             chunk_wav = _numpy_to_wav(audio)
 
             if not first_chunk_sent:

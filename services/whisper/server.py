@@ -7,10 +7,11 @@ audio chunk in, transcript out, low latency.
 
 Endpoints
 ---------
-POST /transcribe     Blocking: audio file → full transcript + segments
-POST /transcribe/vad Transcribe with aggressive Silero VAD pre-filter
-GET  /info           Model metadata
-GET  /health         Liveness probe (ready only after model is loaded)
+POST /transcribe          Blocking: audio file → full transcript + segments
+POST /transcribe/vad      Transcribe with aggressive Silero VAD pre-filter
+WS   /transcribe/stream   WebSocket streaming: raw PCM chunks → JSON transcript
+GET  /info                Model metadata
+GET  /health              Liveness probe (ready only after model is loaded)
 
 Env vars
 --------
@@ -37,8 +38,9 @@ import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
+import numpy as np
 import structlog
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 
@@ -269,6 +271,128 @@ async def transcribe(
         word_timestamps=word_timestamps,
         vad_filter=vad_filter,
     )
+
+
+@app.websocket("/transcribe/stream")
+async def transcribe_ws(ws: WebSocket) -> None:
+    """
+    WebSocket STT endpoint used by the Pipecat pipeline.
+
+    Protocol
+    --------
+    Client → Server : raw PCM bytes (int16, 16 kHz mono) in arbitrary chunks
+    Client → Server : literal bytes ``b'END'`` to signal end of utterance
+    Server → Client : JSON transcript result after each END marker
+    Server → Client : JSON ``{"error": "..."}`` on failure (connection stays open)
+
+    The connection stays alive across multiple utterances — the END/result
+    cycle can repeat indefinitely until the client closes the socket.
+
+    JSON response shape
+    -------------------
+    {
+      "text": "full transcript string",
+      "language": "en",
+      "language_probability": 0.9987,
+      "elapsed_ms": 182.4,
+      "segments": [
+        {"id": 0, "start": 0.0, "end": 1.4, "text": "Hello",
+         "words": [{"word": "Hello", "start": 0.0, "end": 0.5, "probability": 0.99}]}
+      ]
+    }
+    """
+    await ws.accept()
+    remote = ws.client.host if ws.client else "unknown"
+    log = logger.bind(remote=remote)
+    log.info("whisper.ws_connected")
+
+    audio_buffer: bytearray = bytearray()
+
+    try:
+        async for chunk in ws.iter_bytes():
+            if chunk == b"END":
+                if not audio_buffer:
+                    await ws.send_json({"error": "empty audio buffer"})
+                    continue
+
+                if _model is None:
+                    await ws.send_json({"error": "model not loaded"})
+                    audio_buffer.clear()
+                    continue
+
+                t0 = time.perf_counter()
+                try:
+                    # Convert raw int16 PCM → float32 normalised [-1, 1]
+                    audio_np = (
+                        np.frombuffer(bytes(audio_buffer), dtype=np.int16)
+                        .astype(np.float32)
+                        / 32768.0
+                    )
+                    segments_iter, info = _model.transcribe(
+                        audio_np,
+                        language=None,         # auto-detect per utterance
+                        vad_filter=False,      # Pipecat handles VAD externally
+                        word_timestamps=True,
+                        beam_size=5,
+                        condition_on_previous_text=False,
+                        no_speech_threshold=0.6,
+                    )
+
+                    segments: list[dict] = []
+                    for seg in segments_iter:
+                        entry: dict = {
+                            "id": seg.id,
+                            "start": round(seg.start, 3),
+                            "end": round(seg.end, 3),
+                            "text": seg.text.strip(),
+                        }
+                        if seg.words:
+                            entry["words"] = [
+                                {
+                                    "word": w.word,
+                                    "start": round(w.start, 3),
+                                    "end": round(w.end, 3),
+                                    "probability": round(w.probability, 3),
+                                }
+                                for w in seg.words
+                            ]
+                        segments.append(entry)
+
+                    full_text = " ".join(s["text"] for s in segments if s["text"]).strip()
+                    elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+                    log.info(
+                        "whisper.ws_transcribed",
+                        language=info.language,
+                        lang_prob=round(info.language_probability, 3),
+                        samples=len(audio_np),
+                        elapsed_ms=elapsed_ms,
+                        chars=len(full_text),
+                    )
+
+                    await ws.send_json({
+                        "text": full_text,
+                        "language": info.language,
+                        "language_probability": round(info.language_probability, 4),
+                        "elapsed_ms": elapsed_ms,
+                        "segments": segments,
+                    })
+
+                except Exception as exc:
+                    log.exception("whisper.ws_transcribe_error", error=str(exc))
+                    await ws.send_json({"error": f"transcription failed: {exc}"})
+                finally:
+                    audio_buffer.clear()
+
+            else:
+                audio_buffer.extend(chunk)
+
+    except WebSocketDisconnect:
+        log.info("whisper.ws_disconnected")
+    except Exception as exc:
+        log.exception("whisper.ws_error", error=str(exc))
+    finally:
+        audio_buffer.clear()
 
 
 @app.post(
