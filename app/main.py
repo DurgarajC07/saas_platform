@@ -127,5 +127,8 @@ def _register_routers(app: FastAPI) -> None:
     from app.modules.system.router import router as system_router
     app.include_router(system_router, prefix="/api/v1", tags=["System"])
 
+    from app.modules.agents.router import router as agents_router
+    app.include_router(agents_router, prefix="/api/v1", tags=["Agents"])
+
 
 app = create_application()

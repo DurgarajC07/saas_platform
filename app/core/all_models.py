@@ -74,3 +74,10 @@ from app.modules.files.models import File  # noqa: F401
 
 # System
 from app.modules.system.models import SystemSetting  # noqa: F401
+
+# Agents
+from app.modules.agents.models import (  # noqa: F401
+    Agent,
+    AgentPhoneNumber,
+    CallLog,
+)

@@ -160,6 +160,22 @@ PERMISSIONS: list[tuple[str, str, str]] = [
     ("system", "setting", "read"),
     ("system", "setting", "update"),
     ("system", "setting", "list"),
+
+    # ── Agents ────────────────────────────────────────────────────────────
+    ("agents", "agent", "create"),
+    ("agents", "agent", "read"),
+    ("agents", "agent", "update"),
+    ("agents", "agent", "delete"),
+    ("agents", "agent", "list"),
+    ("agents", "phone_number", "create"),
+    ("agents", "phone_number", "read"),
+    ("agents", "phone_number", "list"),
+    ("agents", "knowledge_base", "create"),
+    ("agents", "knowledge_base", "delete"),
+    ("agents", "call_log", "create"),
+    ("agents", "call_log", "read"),
+    ("agents", "call_log", "list"),
+    ("agents", "analytics", "read"),
 ]
 
 
