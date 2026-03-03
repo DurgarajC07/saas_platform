@@ -45,6 +45,7 @@ For a ``speaker_only`` agent the pipeline is just:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 from pipecat.pipeline.pipeline import Pipeline
@@ -95,6 +96,7 @@ class PipelineBuilder:
         self,
         transport: FastAPIWebsocketTransport,
         on_transcription: Callable[[str, str | None], Awaitable[None]] | None = None,
+        recorder: Any | None = None,
     ) -> Pipeline:
         """
         Assemble and return a ready-to-run Pipecat ``Pipeline``.
@@ -104,6 +106,12 @@ class PipelineBuilder:
         transport:
             Configured transport (e.g. from ``transports.websocket``).
             Must expose ``.input()`` and ``.output()`` processor slots.
+        on_transcription:
+            Optional callback invoked by WhisperSTT with ``(text, language)``
+            after each successful transcription.
+        recorder:
+            Optional ``CallRecorder`` instance passed to ``KokoroTTSProcessor``
+            so every outbound audio chunk is mirrored to the recording buffer.
 
         Returns
         -------
@@ -217,6 +225,7 @@ class PipelineBuilder:
             voice=cfg.tts_voice,
             speed=cfg.tts_speed,
             lang=cfg.tts_lang,
+            recorder=recorder,
         )
         self._tts_processor = tts
         processors.append(tts)

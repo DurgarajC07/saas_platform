@@ -255,12 +255,7 @@ class SessionManager:
                     voice=voice,
                 )
 
-        pipeline = await builder.build(
-            transport, on_transcription=_on_transcription
-        )
-        state.tts_processor = builder.tts_processor
-
-        # ── Optional call recorder ─────────────────────────────────────
+        # ── Optional call recorder (created before pipeline so TTS can write to it)
         recorder: CallRecorder | None = None
         try:
             recorder = CallRecorder(
@@ -276,6 +271,11 @@ class SessionManager:
                 session_id=session_id,
                 error=str(exc),
             )
+
+        pipeline = await builder.build(
+            transport, on_transcription=_on_transcription, recorder=recorder
+        )
+        state.tts_processor = builder.tts_processor
 
         # ── Run pipeline ───────────────────────────────────────────────
         task = PipelineTask(
