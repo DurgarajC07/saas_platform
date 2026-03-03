@@ -1,0 +1,37 @@
+# ── Pipecat AI pipeline framework ─────────────────────────────────────────────
+# Extras:
+#   silero  — Silero VAD (onnxruntime cp311 wheel available)
+# NOTE: [local] extra is intentionally excluded — it pulls pyaudio which
+#       requires portaudio native headers and is only needed for desktop
+#       mic/speaker I/O.  This container receives audio over WebSocket.
+# webrtc extra (aiortc) is installed separately below because its transitive
+# deps (av, cryptography) need system libs that we install in the Dockerfile.
+pipecat-ai[silero]>=0.0.55
+
+# ── WebRTC ─────────────────────────────────────────────────────────────────────
+aiortc>=1.9.0
+
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+
+# ── HTTP client (Ollama LLM, health checks) ───────────────────────────────────
+aiohttp>=3.10.0
+httpx>=0.28.0
+
+# ── Qdrant client (RAG retrieval) ─────────────────────────────────────────────
+qdrant-client>=1.9.0
+
+# ── Storage (call recordings → MinIO) ─────────────────────────────────────────
+aioboto3>=13.0.0
+
+# ── Serialisation / audio ─────────────────────────────────────────────────────
+numpy>=1.26.0
+websockets>=13.0.0
+soundfile>=0.12.1
+
+# ── Logging / validation ──────────────────────────────────────────────────────
+structlog>=24.4.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0

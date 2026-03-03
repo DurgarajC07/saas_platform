@@ -139,6 +139,27 @@ ws-test-kokoro: ## Test only the Kokoro WebSocket endpoint
 	$(eval WSTEST_PYTHON := $(shell command -v python3 || command -v python))
 	$(WSTEST_PYTHON) scripts/smoke_test_ws.py --kokoro-only
 
+# ── Pipeline orchestration service ───────────────────────────────────────────
+
+pipeline-up: ## Build and start the pipeline service (and its infra deps)
+	$(INFRA_COMPOSE) up -d --build pipeline
+	@echo "  Pipeline service starting on http://localhost:7000"
+
+pipeline-down: ## Stop and remove the pipeline container
+	$(INFRA_COMPOSE) stop pipeline
+	$(INFRA_COMPOSE) rm -f pipeline
+
+pipeline-logs: ## Tail pipeline service logs
+	$(INFRA_COMPOSE) logs -f pipeline
+
+pipeline-build: ## Force rebuild of the pipeline Docker image (no cache)
+	$(INFRA_COMPOSE) build --no-cache pipeline
+
+pipeline-test: ## Smoke-test the pipeline REST + WebSocket endpoints
+	@echo "Running pipeline smoke tests against http://localhost:7000 ..."
+	$(eval WSTEST_PYTHON := $(shell command -v python3 || command -v python))
+	$(WSTEST_PYTHON) scripts/smoke_test_pipeline.py
+
 # ── NVIDIA Docker runtime setup ───────────────────────────────────────────────
 
 nvidia-docker-setup: ## Install and configure NVIDIA Container Toolkit for Docker (run as sudo if needed)

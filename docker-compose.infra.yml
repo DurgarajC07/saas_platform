@@ -201,6 +201,49 @@ services:
       driver: json-file
       options: { max-size: "100m", max-file: "5" }
 
+  # ── Pipeline orchestration service ──────────────────────────────────────────
+  # Pipecat-based real-time call engine.
+  # Exposes:  POST /sessions  WS /sessions/{id}/ws  GET /health
+  # Port 7000 is the single entry point for voice SDK clients.
+  pipeline:
+    build:
+      context: ./services/pipeline
+      dockerfile: Dockerfile
+    container_name: pipeline
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    environment:
+      HOST_WHISPER_URL: "ws://whisper-1:9000/transcribe/stream"
+      HOST_KOKORO_URL: "ws://kokoro-1:8880/tts/stream"
+      HOST_QDRANT_URL: "http://qdrant:6333"
+      HOST_OLLAMA_URL: "http://host.docker.internal:11434"
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+      MINIO_BUCKET: "call-recordings"
+      RECORDING_ENABLED: "${RECORDING_ENABLED:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    depends_on:
+      - whisper-1
+      - kokoro-1
+      - qdrant
+      - minio
+    networks:
+      - ai-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7000/health')"]
+      interval: 20s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
 # ── Named volumes ─────────────────────────────────────────────────────────────
 volumes:
   whisper_models:
