@@ -10,6 +10,9 @@ AgentPhoneNumber:
 CallLog:
   WriteCallLogRequest / CallLogResponse / CallLogListResponse
 
+KnowledgeBase:
+  KbDocumentResponse / KbDocumentListResponse / KbUploadResponse / KbDeleteDocResponse
+
 Analytics:
   AgentAnalyticsResponse
 
@@ -403,3 +406,56 @@ class AgentAnalyticsResponse(CamelModel):
 
     inbound_calls: int
     outbound_calls: int
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# KNOWLEDGE BASE SCHEMAS
+# ═══════════════════════════════════════════════════════════════════════════
+
+KB_DOC_STATUSES = frozenset({"pending", "processing", "completed", "failed"})
+KB_FILE_TYPES = frozenset({"pdf", "docx", "txt", "md", "csv", "url", "youtube"})
+
+
+class KbDocumentResponse(CamelModel):
+    """Single knowledge-base document record (ingestion status view)."""
+
+    model_config = {"from_attributes": True, "populate_by_name": True}
+
+    id: UUID
+    agent_id: UUID
+    org_id: UUID
+    file_name: str
+    file_type: str
+    file_size_bytes: int | None = None
+    source_url: str | None = None
+    status: str  # pending | processing | completed | failed
+    error_message: str | None = None
+    chunk_count: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KbDocumentListResponse(CamelModel):
+    """Paginated list of knowledge-base documents for an agent."""
+
+    documents: list[KbDocumentResponse]
+    total: int
+
+
+class KbUploadResponse(CamelModel):
+    """Returned immediately (202) after queuing an ingestion job."""
+
+    doc_id: UUID
+    file_name: str
+    file_type: str
+    status: str = "pending"
+    task_id: str
+    qdrant_collection: str
+
+
+class KbDeleteDocResponse(CamelModel):
+    """Returned when a document is successfully deleted from the knowledge base."""
+
+    doc_id: UUID
+    chunks_deleted: int
+    message: str

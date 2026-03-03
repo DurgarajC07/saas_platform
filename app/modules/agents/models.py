@@ -3,9 +3,10 @@ Agents module ORM models.
 
 Tables
 ------
-agents              — Central config record for every AI voice-bot.
-agent_phone_numbers — Phone numbers assigned to an agent (Twilio / Vonage / own).
-call_logs           — Per-call analytics + transcript written on session end.
+agents                  — Central config record for every AI voice-bot.
+agent_phone_numbers     — Phone numbers assigned to an agent (Twilio / Vonage / own).
+call_logs               — Per-call analytics + transcript written on session end.
+kb_documents            — Tracks document ingestion status for each agent's knowledge base.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -137,6 +139,12 @@ class Agent(Base, TimestampMixin, SoftDeleteMixin):
     )
     call_logs: Mapped[list["CallLog"]] = relationship(
         "CallLog",
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        lazy="noload",
+    )
+    kb_documents: Mapped[list["KnowledgeBaseDocument"]] = relationship(
+        "KnowledgeBaseDocument",
         back_populates="agent",
         cascade="all, delete-orphan",
         lazy="noload",
@@ -265,3 +273,79 @@ class CallLog(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<CallLog id={self.id} agent={self.agent_id} status={self.status}>"
+
+
+# ── KnowledgeBaseDocument ──────────────────────────────────────────────────
+
+
+class KnowledgeBaseDocument(Base):
+    """
+    Tracks the ingestion lifecycle of a document added to an agent's
+    knowledge base (Qdrant collection).
+
+    A single upload may produce many Qdrant point vectors (one per chunk);
+    this row stores metadata about the source document so the API can list
+    and delete them by document rather than by individual vector.
+
+    Ingestion status lifecycle:
+        pending → processing → completed
+                             → failed
+
+    Deleting a document record also triggers removal of all Qdrant points
+    whose ``doc_id`` payload field matches this row's ``id``.
+    """
+
+    __tablename__ = "kb_documents"
+    __table_args__ = (
+        Index("ix_kb_documents_agent_id", "agent_id"),
+        Index("ix_kb_documents_org_id", "org_id"),
+        Index("ix_kb_documents_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # ── Source info ──────────────────────────────────────────────────────
+    file_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # pdf | docx | txt | md | csv | url | youtube
+    file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Ingestion state ──────────────────────────────────────────────────
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="pending"
+    )  # pending | processing | completed | failed
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunk_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # ── Timestamps ───────────────────────────────────────────────────────
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    # ── Relationships ────────────────────────────────────────────────────
+    agent: Mapped["Agent"] = relationship(
+        "Agent", back_populates="kb_documents", lazy="noload"
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<KnowledgeBaseDocument id={self.id}"
+            f" file={self.file_name} status={self.status}>"
+        )

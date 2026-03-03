@@ -80,4 +80,5 @@ from app.modules.agents.models import (  # noqa: F401
     Agent,
     AgentPhoneNumber,
     CallLog,
+    KnowledgeBaseDocument,
 )

@@ -38,3 +38,11 @@ httpx>=0.28.0
 
 # Utilities
 python-slugify>=8.0.4
+
+# RAG / knowledge base
+qdrant-client>=1.12.0
+fastembed>=0.4.0
+pymupdf>=1.24.0
+python-docx>=1.1.0
+html2text>=2024.2.26
+youtube-transcript-api>=0.6.2

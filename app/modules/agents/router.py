@@ -14,8 +14,10 @@ Registered in main.py at prefix /api/v1 so routes resolve to:
   PUT    /api/v1/agents/{agent_id}/prompt            Update system prompt only
   POST   /api/v1/agents/{agent_id}/phone-numbers     Assign phone number
   GET    /api/v1/agents/{agent_id}/phone-numbers     List phone numbers
-  POST   /api/v1/agents/{agent_id}/knowledge-base    Upload documents (queued)
-  DELETE /api/v1/agents/{agent_id}/knowledge-base    Clear knowledge base
+  POST   /api/v1/agents/{agent_id}/knowledge-base    Upload document (multipart, queued)
+  GET    /api/v1/agents/{agent_id}/knowledge-base    List KB documents + status
+  DELETE /api/v1/agents/{agent_id}/knowledge-base    Clear entire knowledge base
+  DELETE /api/v1/agents/{agent_id}/knowledge-base/{doc_id}  Delete single document
   PUT    /api/v1/agents/{agent_id}/tools             Replace tool definitions
   GET    /api/v1/agents/{agent_id}/calls             Paginated call history
   GET    /api/v1/agents/{agent_id}/analytics         Latency + volume stats
@@ -35,7 +37,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db
@@ -51,6 +53,9 @@ from app.modules.agents.schemas import (
     CallLogListResponse,
     CallLogResponse,
     CreateAgentRequest,
+    KbDeleteDocResponse,
+    KbDocumentListResponse,
+    KbUploadResponse,
     RecordingUrlResponse,
     TestCallResponse,
     UpdateAgentRequest,
@@ -59,6 +64,7 @@ from app.modules.agents.schemas import (
     WriteCallLogRequest,
 )
 from app.modules.agents.service import AgentService, CallLogService
+from app.modules.agents.kb_service import KnowledgeBaseService
 
 router = APIRouter()
 
@@ -284,8 +290,9 @@ async def list_phone_numbers(
 
 @router.post(
     "/agents/{agent_id}/knowledge-base",
+    response_model=KbUploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Upload documents to agent knowledge base",
+    summary="Upload document to agent knowledge base",
     tags=["Agents"],
 )
 async def upload_knowledge_base(
@@ -293,26 +300,75 @@ async def upload_knowledge_base(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
-) -> dict:
+    file: UploadFile = File(..., description="Document to ingest (PDF, DOCX, TXT, MD, CSV)"),
+    source_url: str | None = Query(default=None, description="Source URL for url/youtube types"),
+) -> KbUploadResponse:
     """
-    Queue document ingestion into the agent's Qdrant collection.
+    Upload a document and queue it for ingestion into the agent's Qdrant
+    knowledge-base collection.
 
-    **Full implementation requires multipart file upload + Celery task.**
-    This stub returns 202 and the Qdrant collection name so the API contract
-    is established for the frontend.
+    The response is immediate (202); ingestion runs in the background via
+    a Celery worker.  Poll **GET /knowledge-base** to track progress.
+
+    Supported formats: `pdf`, `docx`, `txt`, `md`, `csv`, `url`, `youtube`.
     """
-    svc = AgentService(db)
-    agent = await svc.get_agent(agent_id, org_id)
-    return {
-        "message": "Knowledge base ingestion queued",
-        "qdrant_collection": agent.qdrant_collection or f"agent_{agent_id}",
-    }
+    svc = KnowledgeBaseService(db)
+    return await svc.upload_document(
+        agent_id=agent_id,
+        org_id=org_id,
+        file=file,
+        source_url=source_url,
+    )
+
+
+@router.get(
+    "/agents/{agent_id}/knowledge-base",
+    response_model=KbDocumentListResponse,
+    summary="List knowledge-base documents",
+    tags=["Agents"],
+)
+async def list_knowledge_base(
+    agent_id: UUID,
+    actor: AgentReadUser,
+    org_id: OrgID,
+    db: DB,
+    kb_status: str | None = Query(default=None, alias="status"),
+) -> KbDocumentListResponse:
+    """
+    Return all documents in the agent's knowledge base with their ingestion
+    status (``pending`` | ``processing`` | ``completed`` | ``failed``).
+    """
+    svc = KnowledgeBaseService(db)
+    return await svc.list_documents(agent_id=agent_id, org_id=org_id, status=kb_status)
+
+
+@router.delete(
+    "/agents/{agent_id}/knowledge-base/{doc_id}",
+    response_model=KbDeleteDocResponse,
+    summary="Delete a single knowledge-base document",
+    tags=["Agents"],
+)
+async def delete_kb_document(
+    agent_id: UUID,
+    doc_id: UUID,
+    actor: AgentUpdateUser,
+    org_id: OrgID,
+    db: DB,
+) -> KbDeleteDocResponse:
+    """
+    Remove a single document from the agent's knowledge base.
+
+    All Qdrant vector points associated with the document are deleted, and
+    the metadata record is removed from the database.
+    """
+    svc = KnowledgeBaseService(db)
+    return await svc.delete_document(agent_id=agent_id, org_id=org_id, doc_id=doc_id)
 
 
 @router.delete(
     "/agents/{agent_id}/knowledge-base",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Clear agent knowledge base",
+    summary="Clear entire agent knowledge base",
     tags=["Agents"],
 )
 async def clear_knowledge_base(
@@ -322,13 +378,11 @@ async def clear_knowledge_base(
     db: DB,
 ) -> None:
     """
-    Delete all vectors from the agent's Qdrant collection.
-
-    **Full implementation requires Qdrant client.**
-    This stub validates ownership and returns 204.
+    Drop the agent's entire Qdrant collection and remove all knowledge-base
+    document records.  This is irreversible — all ingested content is deleted.
     """
-    svc = AgentService(db)
-    await svc.get_agent(agent_id, org_id)  # ownership check
+    svc = KnowledgeBaseService(db)
+    await svc.clear_all(agent_id=agent_id, org_id=org_id)
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────

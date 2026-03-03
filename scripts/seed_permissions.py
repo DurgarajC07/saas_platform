@@ -171,6 +171,8 @@ PERMISSIONS: list[tuple[str, str, str]] = [
     ("agents", "phone_number", "read"),
     ("agents", "phone_number", "list"),
     ("agents", "knowledge_base", "create"),
+    ("agents", "knowledge_base", "read"),
+    ("agents", "knowledge_base", "list"),
     ("agents", "knowledge_base", "delete"),
     ("agents", "call_log", "create"),
     ("agents", "call_log", "read"),

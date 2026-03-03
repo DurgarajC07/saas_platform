@@ -112,6 +112,15 @@ class Settings(BaseSettings):
     # Base URL used to build OAuth2 redirect URIs (e.g. https://api.example.com)
     OAUTH_REDIRECT_BASE_URL: str = "http://localhost:8000"
 
+    # ── Qdrant / RAG ───────────────────────────────────────────────────────
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""       # leave blank for local / single-node
+    RAG_EMBED_MODEL: str = "BAAI/bge-small-en-v1.5"   # 384-dim, ~130 MB
+    RAG_CHUNK_SIZE: int = 512      # approximate token budget per chunk
+    RAG_CHUNK_OVERLAP: int = 50    # overlap between consecutive chunks
+    RAG_SCORE_THRESHOLD: float = 0.6
+    RAG_DEFAULT_TOP_K: int = 3
+
     # ── Helpers ────────────────────────────────────────────────────────────
     @property
     def is_production(self) -> bool:
