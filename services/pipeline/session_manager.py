@@ -31,7 +31,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 
 from call_recorder import CallRecorder
 from pipeline_builder import PipelineBuilder
-from schemas import AgentConfig, SessionInfo
+from schemas import AgentConfig, SessionInfo, LANGUAGE_VOICE_MAP
 from transports.websocket import make_ws_transport
 
 log: structlog.BoundLogger = structlog.get_logger(__name__)
@@ -46,6 +46,8 @@ class _SessionState:
         "task",
         "recorder",
         "created_at",
+        "detected_language",
+        "tts_processor",
     )
 
     def __init__(
@@ -60,6 +62,8 @@ class _SessionState:
         self.task = task
         self.recorder = recorder
         self.created_at = datetime.now(tz=timezone.utc)
+        self.detected_language: str | None = None
+        self.tts_processor = None  # KokoroTTSProcessor, set after pipeline build
 
 
 class SessionManager:
@@ -225,7 +229,36 @@ class SessionManager:
 
         # ── Build transport + pipeline ─────────────────────────────────
         transport = make_ws_transport(ws)
-        pipeline = await PipelineBuilder(config).build(transport)
+        builder = PipelineBuilder(config)
+
+        async def _on_transcription(text: str, language: str | None) -> None:
+            """Called by WhisperSTTProcessor after each successful transcription.
+
+            Updates the session's detected language and switches the TTS voice
+            so multilingual callers are responded to in their own language.
+            """
+            if not language or state.detected_language == language:
+                return
+            state.detected_language = language
+            log.info(
+                "language_detected",
+                session_id=session_id,
+                language=language,
+            )
+            if state.tts_processor is not None:
+                voice = LANGUAGE_VOICE_MAP.get(language, config.tts_voice)
+                state.tts_processor.set_voice(voice, language)
+                log.info(
+                    "tts_voice_updated",
+                    session_id=session_id,
+                    language=language,
+                    voice=voice,
+                )
+
+        pipeline = await builder.build(
+            transport, on_transcription=_on_transcription
+        )
+        state.tts_processor = builder.tts_processor
 
         # ── Optional call recorder ─────────────────────────────────────
         recorder: CallRecorder | None = None

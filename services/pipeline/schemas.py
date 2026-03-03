@@ -43,6 +43,23 @@ class NoiseRemovalLevel(str, Enum):
     DEEPFILTERNET = "deepfilternet"
 
 
+# ── Language → TTS voice mapping ──────────────────────────────────────────────
+# BCP-47 language code returned by Whisper auto-detection → Kokoro voice id.
+# Used by SessionManager to switch voices mid-session when the caller's
+# language differs from the agent's configured default.
+LANGUAGE_VOICE_MAP: dict[str, str] = {
+    "en": "af_heart",    # English (American)
+    "hi": "hf_alpha",    # Hindi
+    "es": "ef_dora",     # Spanish
+    "fr": "ff_siwis",    # French
+    "de": "df_ketola",   # German
+    "ja": "jf_alpha",    # Japanese
+    "zh": "zf_xiaobei",  # Mandarin
+    "ko": "kf_luna",     # Korean
+    "pt": "pf_dora",     # Portuguese
+}
+
+
 class AgentConfig(BaseModel):
     """
     Full agent configuration loaded from the saas_platform database.

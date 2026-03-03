@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -66,14 +68,17 @@ class WhisperSTTProcessor(FrameProcessor):
         self,
         whisper_url: str = _WHISPER_URL_DEFAULT,
         language: str | None = None,
+        on_transcription: Callable[[str, str | None], Awaitable[None]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._whisper_url = whisper_url
-        self._language    = language
+        self._whisper_url     = whisper_url
+        self._language        = language
+        self._on_transcription = on_transcription
         self._ws: ws_client.ClientConnection | None = None
         self._audio_buffer: bytearray = bytearray()
         self._reconnect_delay: float = _RECONNECT_DELAY_S
+        self._unavailable: bool = False
         self._log = logger.bind(processor="WhisperSTT", url=whisper_url)
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
@@ -104,11 +109,31 @@ class WhisperSTTProcessor(FrameProcessor):
     # ── Internal ────────────────────────────────────────────────────────────
 
     async def _connect(self) -> None:
-        """Open (or re-open) WebSocket connection to the Whisper service."""
-        self._log.info("whisper_stt.connecting")
-        self._ws = await ws_client.connect(self._whisper_url, open_timeout=10)
-        self._reconnect_delay = _RECONNECT_DELAY_S
-        self._log.info("whisper_stt.connected")
+        """Open (or re-open) WebSocket connection to the Whisper service.
+
+        Appends a ``?language=<code>`` query param when a language hint is
+        configured so the Whisper server can skip language detection and reduce
+        latency by ~30–80 ms per utterance.
+        """
+        url = self._whisper_url
+        if self._language:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}language={self._language}"
+
+        try:
+            self._log.info("whisper_stt.connecting", url=url)
+            self._ws = await ws_client.connect(url, open_timeout=10)
+            self._unavailable = False
+            self._reconnect_delay = _RECONNECT_DELAY_S
+            self._log.info("whisper_stt.connected")
+        except Exception as exc:
+            self._log.error(
+                "whisper_stt.connection_failed",
+                error=str(exc),
+                url=url,
+            )
+            self._unavailable = True
+            self._ws = None
 
     async def _close(self) -> None:
         if self._ws:
@@ -119,18 +144,32 @@ class WhisperSTTProcessor(FrameProcessor):
             self._ws = None
 
     async def _flush_and_transcribe(self) -> None:
-        """Send accumulated audio + END marker, wait for transcript, emit frame."""
+        """Send accumulated audio + END marker, wait for transcript, emit frame.
+
+        Measures client-side round-trip latency (``latency_ms``) and logs it
+        alongside the server-reported processing time (``server_elapsed_ms``).
+        When the Whisper service is unavailable the audio buffer is cleared and
+        a background reconnect is scheduled so the pipeline keeps running.
+        """
         if not self._audio_buffer:
             return
 
-        if not self._ws:
-            self._log.warning("whisper_stt.not_connected — dropping utterance")
+        # Whisper service is down — drop utterance and try to reconnect
+        if self._unavailable or not self._ws:
+            self._log.warning(
+                "whisper_stt.unavailable",
+                action="dropping_utterance",
+                buffered_bytes=len(self._audio_buffer),
+            )
             self._audio_buffer.clear()
+            asyncio.create_task(self._connect())  # non-blocking reconnect attempt
             return
 
         try:
             audio_bytes = bytes(self._audio_buffer)
             self._audio_buffer.clear()
+
+            t0 = time.perf_counter()
 
             # Stream audio in 4 KB chunks then signal end-of-utterance
             chunk_size = 4096
@@ -140,33 +179,48 @@ class WhisperSTTProcessor(FrameProcessor):
 
             # Wait for transcript (Whisper responds after END)
             raw = await asyncio.wait_for(self._ws.recv(), timeout=30.0)
+            latency_ms = round((time.perf_counter() - t0) * 1000)
+
             result: dict = json.loads(raw)
 
             if "error" in result:
-                self._log.error("whisper_stt.server_error", error=result["error"])
+                self._log.error(
+                    "whisper_stt.server_error",
+                    error=result["error"],
+                    latency_ms=latency_ms,
+                )
                 return
 
-            text = result.get("text", "").strip()
+            text     = result.get("text", "").strip()
+            language = result.get("language")
+
             if text:
                 self._log.info(
                     "whisper_stt.transcription",
                     text=text[:80],
-                    language=result.get("language"),
-                    elapsed_ms=result.get("elapsed_ms"),
+                    language=language,
+                    latency_ms=latency_ms,
+                    server_elapsed_ms=result.get("elapsed_ms"),
                 )
                 await self.push_frame(
                     TranscriptionFrame(
                         text=text,
                         user_id="caller",
-                        timestamp=result.get("elapsed_ms"),
+                        timestamp=latency_ms,
                     )
                 )
+                if self._on_transcription is not None:
+                    await self._on_transcription(text, language)
             else:
-                self._log.debug("whisper_stt.empty_transcript")
+                self._log.debug(
+                    "whisper_stt.empty_transcript",
+                    latency_ms=latency_ms,
+                )
 
         except (websockets.ConnectionClosed, asyncio.TimeoutError) as exc:
             self._log.warning("whisper_stt.connection_lost", error=str(exc))
             self._ws = None
+            self._unavailable = True
             await asyncio.sleep(self._reconnect_delay)
             self._reconnect_delay = min(
                 self._reconnect_delay * 2, _MAX_RECONNECT_DELAY_S

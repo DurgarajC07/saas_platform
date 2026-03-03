@@ -44,6 +44,8 @@ For a ``speaker_only`` agent the pipeline is just:
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 import structlog
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
@@ -73,13 +75,26 @@ class PipelineBuilder:
 
     def __init__(self, config: AgentConfig) -> None:
         self._cfg = config
+        self._tts_processor: KokoroTTSProcessor | None = None
+
+    @property
+    def tts_processor(self) -> KokoroTTSProcessor | None:
+        """The ``KokoroTTSProcessor`` built by the last ``build()`` call.
+
+        Available after ``build()`` returns; used by ``SessionManager`` to
+        update the TTS voice when auto-detected language differs from the
+        agent's configured default.
+        """
+        return self._tts_processor
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     async def build(
-        self, transport: FastAPIWebsocketTransport
+        self,
+        transport: FastAPIWebsocketTransport,
+        on_transcription: Callable[[str, str | None], Awaitable[None]] | None = None,
     ) -> Pipeline:
         """
         Assemble and return a ready-to-run Pipecat ``Pipeline``.
@@ -122,8 +137,18 @@ class PipelineBuilder:
             log.debug("pipeline_slot_enabled", slot="vad")
 
             # ── 3. STT ────────────────────────────────────────────────
-            processors.append(WhisperSTTProcessor(whisper_url=cfg.whisper_url))
-            log.debug("pipeline_slot_enabled", slot="stt")
+            processors.append(
+                WhisperSTTProcessor(
+                    whisper_url=cfg.whisper_url,
+                    language=cfg.language,
+                    on_transcription=on_transcription,
+                )
+            )
+            log.debug(
+                "pipeline_slot_enabled",
+                slot="stt",
+                language=cfg.language or "auto",
+            )
 
         # ── 4. RAG retrieval ──────────────────────────────────────────
         if cfg.qdrant_collection:
@@ -176,14 +201,14 @@ class PipelineBuilder:
         )
 
         # ── 8. TTS ───────────────────────────────────────────────────
-        processors.append(
-            KokoroTTSProcessor(
-                kokoro_url=cfg.kokoro_url,
-                voice=cfg.tts_voice,
-                speed=cfg.tts_speed,
-                lang=cfg.tts_lang,
-            )
+        tts = KokoroTTSProcessor(
+            kokoro_url=cfg.kokoro_url,
+            voice=cfg.tts_voice,
+            speed=cfg.tts_speed,
+            lang=cfg.tts_lang,
         )
+        self._tts_processor = tts
+        processors.append(tts)
         log.debug("pipeline_slot_enabled", slot="tts", voice=cfg.tts_voice)
 
         # ── 9. Transport output ───────────────────────────────────────
