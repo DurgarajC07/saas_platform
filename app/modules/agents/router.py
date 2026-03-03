@@ -11,6 +11,7 @@ Registered in main.py at prefix /api/v1 so routes resolve to:
   PATCH  /api/v1/agents/{agent_id}                   Update any config field
   DELETE /api/v1/agents/{agent_id}                   Soft delete
   POST   /api/v1/agents/{agent_id}/test-call         Issue WebSocket test URL
+  POST   /api/v1/agents/{agent_id}/webrtc/connect     WebRTC SDP exchange (browser → pipeline)
   PUT    /api/v1/agents/{agent_id}/prompt            Update system prompt only
   POST   /api/v1/agents/{agent_id}/phone-numbers     Assign phone number
   GET    /api/v1/agents/{agent_id}/phone-numbers     List phone numbers
@@ -61,6 +62,8 @@ from app.modules.agents.schemas import (
     UpdateAgentRequest,
     UpdatePromptRequest,
     UpdateToolsRequest,
+    WebRTCConnectResponse,
+    WebRTCOfferRequest,
     WriteCallLogRequest,
 )
 from app.modules.agents.service import AgentService, CallLogService
@@ -223,6 +226,42 @@ async def test_call(
     """
     svc = AgentService(db)
     return await svc.test_call(agent_id, org_id)
+
+
+# ── WebRTC connect ────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/agents/{agent_id}/webrtc/connect",
+    response_model=WebRTCConnectResponse,
+    summary="Initiate WebRTC call to agent",
+    tags=["Agents"],
+    status_code=status.HTTP_200_OK,
+)
+async def webrtc_connect(
+    agent_id: UUID,
+    body: WebRTCOfferRequest,
+    actor: AgentReadUser,
+    org_id: OrgID,
+    db: DB,
+) -> WebRTCConnectResponse:
+    """
+    Exchange an SDP offer/answer with the pipeline service to establish a
+    WebRTC audio call directly from the browser.
+
+    The browser flow:
+      1. Call ``navigator.mediaDevices.getUserMedia({audio: true})`` to get
+         the local audio track.
+      2. Create an ``RTCPeerConnection`` and add the audio track.
+      3. Call ``createOffer()`` and ``setLocalDescription()``.
+      4. POST this endpoint with ``{sdp, type}`` from the local description.
+      5. Set the returned ``sdp`` as the remote description.
+      6. Audio now flows bidirectionally over SRTP.
+
+    Returns the SDP answer and an ICE server list.
+    """
+    svc = AgentService(db)
+    return await svc.webrtc_connect(agent_id, org_id, body)
 
 
 # ── Prompt ───────────────────────────────────────────────────────────────────

@@ -249,6 +249,37 @@ class TestCallResponse(CamelModel):
     expires_in_seconds: int = 300
 
 
+# ── WebRTC signalling ─────────────────────────────────────────────────────────
+
+class WebRTCOfferRequest(CamelModel):
+    """
+    SDP offer forwarded from the browser.
+
+    The browser calls ``RTCPeerConnection.createOffer()``, serialises
+    ``localDescription.sdp``, and POSTs it here.  The platform proxies it
+    to the pipeline service and returns the answer SDP.
+    """
+    sdp: str = Field(..., description="SDP offer string")
+    type: str = Field(default="offer")
+
+
+class WebRTCConnectResponse(CamelModel):
+    """
+    SDP answer and ICE server list returned to the browser.
+
+    Fields
+    ------
+    sdp:         answer SDP — pass to ``RTCPeerConnection.setRemoteDescription``
+    type:        always ``"answer"``
+    session_id:  use for subsequent session management REST calls
+    ice_servers: list of ``{urls, username?, credential?}`` dicts
+    """
+    sdp: str
+    type: str = "answer"
+    session_id: str
+    ice_servers: list[dict] = Field(default_factory=list)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PHONE NUMBER SCHEMAS
 # ═══════════════════════════════════════════════════════════════════════════

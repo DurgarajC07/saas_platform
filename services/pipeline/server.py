@@ -34,9 +34,10 @@ import structlog
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
-from schemas import AgentConfig, HealthResponse, SessionCreateRequest, SessionInfo
+from schemas import AgentConfig, HealthResponse, SessionCreateRequest, SessionInfo, WebRTCAnswerResponse, WebRTCOfferRequest
 from session_manager import SessionManager
 from metrics import init_metrics, get_metrics
+from transports.webrtc import ice_servers_for_client
 
 logger = structlog.get_logger(__name__)
 
@@ -135,18 +136,27 @@ async def create_session(body: SessionCreateRequest) -> SessionInfo:
 
     The caller should:
       1. POST /sessions with the agent config.
-      2. Connect to the returned ``ws_url`` with raw 16-bit PCM audio at 16 kHz.
+      2a. (WebSocket) Connect to the returned ``ws_url`` with raw 16-bit PCM audio at 16 kHz.
+      2b. (WebRTC)    POST an SDP offer to ``webrtc_url`` to get an SDP answer, then
+          connect via standard ``RTCPeerConnection``.
       3. Receive binary frames containing 16-bit PCM audio responses.
       4. DELETE /sessions/{id} when the call ends (or let it timeout).
     """
     if not _session_manager:
         raise HTTPException(status_code=503, detail="Session manager not ready")
 
+    # Determine base URL for session endpoint URLs
+    base_http = os.getenv("PIPELINE_BASE_URL", "http://localhost:7000")
+    base_ws   = base_http.replace("https://", "wss://").replace("http://", "ws://")
+
     session = await _session_manager.create(
         agent_config=body.agent_config,
         call_id=body.call_id,
         metadata=body.metadata,
+        base_url=base_ws,
     )
+    # Populate WebRTC offer URL so clients know where to send the SDP offer
+    session.webrtc_url = f"{base_http}/sessions/{session.session_id}/webrtc/offer"
     return session
 
 
@@ -219,3 +229,52 @@ async def session_ws(session_id: str, ws: WebSocket) -> None:
         log.exception("pipeline.ws_error", error=str(exc))
     finally:
         log.info("pipeline.ws_closed")
+
+
+# ── WebRTC signalling ─────────────────────────────────────────────────────────
+
+@app.post(
+    "/sessions/{session_id}/webrtc/offer",
+    tags=["Sessions"],
+    response_model=WebRTCAnswerResponse,
+    summary="WebRTC SDP offer → answer exchange",
+)
+async def webrtc_offer(
+    session_id: str, body: WebRTCOfferRequest
+) -> WebRTCAnswerResponse:
+    """
+    Accept an SDP offer from a browser ``RTCPeerConnection``, perform the
+    ICE-gathering / DTLS handshake via aiortc, and return the SDP answer.
+
+    The browser flow is:
+      1. ``POST /sessions`` to create a session.
+      2. ``POST /sessions/{id}/webrtc/offer`` with ``{sdp, type}`` payload.
+      3. Set the returned ``sdp`` as the remote description on the
+         ``RTCPeerConnection``.
+      4. Audio now flows bidirectionally over SRTP.
+
+    A ``409 Conflict`` is returned when the session already has an active
+    WebRTC connection.  A ``404`` is returned for unknown sessions.
+    """
+    if not _session_manager:
+        raise HTTPException(status_code=503, detail="Session manager not ready")
+    session = _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404, detail=f"Session {session_id!r} not found"
+        )
+    result = await _session_manager.setup_webrtc(
+        session_id, body.sdp, body.type
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="WebRTC already configured for this session or session not found",
+        )
+    answer_sdp, answer_type = result
+    return WebRTCAnswerResponse(
+        sdp=answer_sdp,
+        type=answer_type,
+        session_id=session_id,
+        ice_servers=ice_servers_for_client(),
+    )

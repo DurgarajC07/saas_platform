@@ -55,6 +55,8 @@ from app.modules.agents.schemas import (
     UpdateAgentRequest,
     UpdatePromptRequest,
     UpdateToolsRequest,
+    WebRTCConnectResponse,
+    WebRTCOfferRequest,
     WriteCallLogRequest,
 )
 from app.modules.auth.models import User
@@ -333,6 +335,111 @@ class AgentService:
 
         logger.info("agent.test_call_issued", agent_id=str(agent_id), session=session_id)
         return TestCallResponse(ws_url=ws_url, session_id=session_id)
+
+    # ── WebRTC connect ──────────────────────────────────────────────────────
+
+    async def webrtc_connect(
+        self,
+        agent_id: UUID,
+        org_id: UUID,
+        offer: WebRTCOfferRequest,
+    ) -> WebRTCConnectResponse:
+        """
+        Create a pipeline session then exchange SDP offer/answer for WebRTC.
+
+        Steps
+        -----
+        1. Resolve the agent (org-scoped).
+        2. POST ``/sessions`` to the pipeline service — allocates a session
+           and returns a ``session_id`` together with the ``webrtc_url``.
+        3. POST the SDP offer to ``webrtc_url`` — pipeline performs the
+           aiortc ICE-gathering / DTLS handshake and returns the SDP answer.
+        4. Return ``WebRTCConnectResponse`` so the browser can call
+           ``RTCPeerConnection.setRemoteDescription(answer)``.
+        """
+        import httpx
+
+        agent = await self.repo.get_by_id_and_org(agent_id, org_id)
+        if not agent:
+            raise NotFoundException(f"Agent {agent_id} not found")
+
+        settings = get_settings()
+        pipeline_url: str = getattr(
+            settings, "PIPELINE_SERVICE_URL", "http://localhost:7000"
+        )
+
+        agent_config = {
+            "agent_id": str(agent.id),
+            "organization_id": str(agent.org_id),
+            "name": agent.name,
+            "agent_type": agent.agent_type,
+            "llm_model": agent.llm_model,
+            "system_prompt": agent.system_prompt or "",
+            "temperature": float(agent.temperature) if agent.temperature is not None else 0.7,
+            "max_tokens": agent.max_tokens or 512,
+            "tts_voice": agent.tts_voice,
+            "tts_speed": float(agent.tts_speed) if agent.tts_speed is not None else 1.0,
+            "vad_threshold": float(agent.vad_threshold) if agent.vad_threshold is not None else 0.5,
+            "min_speech_ms": agent.min_speech_ms or 250,
+            "silence_ms": agent.silence_ms or 700,
+            "allow_interruptions": bool(agent.allow_interruptions),
+            "qdrant_collection": agent.qdrant_collection,
+            "rag_top_k": agent.rag_top_k or 3,
+            "tools_json": agent.tools_json,
+            "noise_removal_level": agent.noise_removal_level or "rnnoise",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r_session = await client.post(
+                    f"{pipeline_url}/sessions",
+                    json={
+                        "agent_config": agent_config,
+                        "call_id": None,
+                        "metadata": {"transport": "webrtc"},
+                    },
+                )
+                r_session.raise_for_status()
+                session_data = r_session.json()
+                session_id: str = session_data["session_id"]
+                webrtc_url: str = session_data.get(
+                    "webrtc_url",
+                    f"{pipeline_url}/sessions/{session_id}/webrtc/offer",
+                )
+
+                r_offer = await client.post(
+                    webrtc_url,
+                    json={"sdp": offer.sdp, "type": offer.type},
+                )
+                r_offer.raise_for_status()
+                answer = r_offer.json()
+        except httpx.ConnectError as exc:
+            raise ConflictException(
+                f"Pipeline service unavailable at {pipeline_url}"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            detail = f"Pipeline error {status}: {exc.response.text[:200]}"
+            raise ConflictException(detail) from exc
+        except httpx.TimeoutException as exc:
+            raise ConflictException("Pipeline service timed out") from exc
+
+        ice_servers: list[dict] = answer.get(
+            "ice_servers",
+            getattr(settings, "ice_server_list", [{"urls": "stun:stun.l.google.com:19302"}]),
+        )
+
+        logger.info(
+            "agent.webrtc_connect",
+            agent_id=str(agent_id),
+            session_id=session_id,
+        )
+        return WebRTCConnectResponse(
+            sdp=answer["sdp"],
+            type=answer["type"],
+            session_id=session_id,
+            ice_servers=ice_servers,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

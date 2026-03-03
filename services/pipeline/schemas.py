@@ -189,7 +189,8 @@ class SessionInfo(BaseModel):
     agent_id: str
     call_id: str | None
     status: str              # "created" | "running" | "ended" | "error"
-    ws_url: str              # WebSocket URL for the caller to connect to
+    ws_url: str              # WebSocket URL (fallback transport)
+    webrtc_url: str | None = None  # WebRTC offer endpoint URL (set after session creation)
     created_at: str
 
 
@@ -197,3 +198,35 @@ class HealthResponse(BaseModel):
     status: str
     sessions_active: int
     version: str = "1.0.0"
+
+
+# ── WebRTC signalling schemas ─────────────────────────────────────────────────
+
+class WebRTCOfferRequest(BaseModel):
+    """
+    SDP offer from the browser's ``RTCPeerConnection.createOffer()``.
+
+    Fields
+    ------
+    sdp:   raw SDP string from ``localDescription.sdp``
+    type:  usually ``"offer"``; included for forward-compatibility
+    """
+    sdp: str
+    type: str = "offer"
+
+
+class WebRTCAnswerResponse(BaseModel):
+    """
+    SDP answer returned to the browser.
+
+    Fields
+    ------
+    sdp:         answer SDP for ``setRemoteDescription``
+    type:        always ``"answer"``
+    session_id:  pipeline session ID (for subsequent REST calls)
+    ice_servers: JSON-serialisable ICE server list for the peer connection
+    """
+    sdp: str
+    type: str = "answer"
+    session_id: str
+    ice_servers: list[dict] = Field(default_factory=list)

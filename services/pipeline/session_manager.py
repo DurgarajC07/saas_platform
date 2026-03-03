@@ -72,6 +72,7 @@ class _SessionState:
         "created_at",
         "detected_language",
         "tts_processor",
+        "webrtc_transport",
     )
 
     def __init__(
@@ -88,6 +89,7 @@ class _SessionState:
         self.created_at = datetime.now(tz=timezone.utc)
         self.detected_language: str | None = None
         self.tts_processor = None  # KokoroTTSProcessor, set after pipeline build
+        self.webrtc_transport = None  # WebRTCTransport | None
 
 
 class SessionManager:
@@ -230,6 +232,180 @@ class SessionManager:
         if _m is not None:
             _m.set_active_sessions(count)
         return count
+
+    # ------------------------------------------------------------------
+    # WebRTC runner
+    # ------------------------------------------------------------------
+
+    async def setup_webrtc(
+        self,
+        session_id: str,
+        offer_sdp: str,
+        offer_type: str = "offer",
+    ) -> tuple[str, str] | None:
+        """
+        Perform the SDP offer/answer exchange for *session_id* and start the
+        WebRTC pipeline in a background task.
+
+        Returns ``(answer_sdp, answer_type)`` on success, or ``None`` when the
+        session is not found or a WebRTC connection is already active.
+        """
+        from transports.webrtc import WebRTCTransport, create_answer
+
+        state = self._sessions.get(session_id)
+        if state is None:
+            log.warning("setup_webrtc.session_not_found", session_id=session_id)
+            return None
+        if state.webrtc_transport is not None:
+            log.warning("setup_webrtc.already_configured", session_id=session_id)
+            return None
+
+        pc, answer_sdp, answer_type = await create_answer(offer_sdp, offer_type)
+        transport = WebRTCTransport(pc)
+
+        @pc.on("track")
+        def _on_track(track) -> None:  # type: ignore[no-untyped-def]
+            if track.kind == "audio":
+                transport.attach_track(track)
+                log.info(
+                    "setup_webrtc.inbound_track_attached",
+                    session_id=session_id,
+                )
+
+        state.webrtc_transport = transport
+
+        asyncio.create_task(
+            self._run_webrtc_pipeline(session_id),
+            name=f"webrtc_pipeline_{session_id}",
+        )
+
+        log.info(
+            "setup_webrtc.done",
+            session_id=session_id,
+            answer_type=answer_type,
+        )
+        return answer_sdp, answer_type
+
+    async def _run_webrtc_pipeline(self, session_id: str) -> None:
+        """
+        Run the full pipeline lifecycle for a WebRTC session.
+
+        This mirrors ``run_ws()`` but drives the pipeline through a
+        ``WebRTCTransport`` instead of a ``FastAPIWebsocketTransport``.
+        """
+        state = self._sessions.get(session_id)
+        if state is None or state.webrtc_transport is None:
+            log.warning("run_webrtc.not_ready", session_id=session_id)
+            return
+
+        # ── Concurrency gate ─────────────────────────────────────────────────
+        active_running = sum(
+            1 for s in self._sessions.values()
+            if s.info.status == "active"
+        )
+        if active_running >= self.MAX_CONCURRENT_CALLS:
+            log.warning(
+                "session_capacity_reached",
+                active=active_running,
+                max=self.MAX_CONCURRENT_CALLS,
+                session_id=session_id,
+            )
+            return
+
+        state.info.status = "active"
+        config = state.config
+        transport = state.webrtc_transport
+
+        # ── Language-adaptive TTS callback ──────────────────────────────────
+        async def _on_transcription(text: str, language: str | None) -> None:
+            if not language or state.detected_language == language:
+                return
+            state.detected_language = language
+            log.info(
+                "language_detected",
+                session_id=session_id,
+                language=language,
+            )
+            if state.tts_processor is not None:
+                voice = LANGUAGE_VOICE_MAP.get(language, config.tts_voice)
+                state.tts_processor.set_voice(voice, language)
+                log.info(
+                    "tts_voice_updated",
+                    session_id=session_id,
+                    language=language,
+                    voice=voice,
+                )
+
+        # ── Optional call recorder ───────────────────────────────────────────
+        recorder: CallRecorder | None = None
+        try:
+            recorder = CallRecorder(
+                session_id=session_id,
+                call_id=state.info.call_id,
+                organization_id=str(config.organization_id),
+            )
+            await recorder.start()
+            state.recorder = recorder
+        except Exception as exc:
+            log.warning(
+                "call_recorder_start_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
+        # ── Build + run pipeline ─────────────────────────────────────────────
+        builder = PipelineBuilder(config)
+        pipeline = await builder.build_for_webrtc(
+            transport,
+            on_transcription=_on_transcription,
+            recorder=recorder,
+        )
+        state.tts_processor = builder.tts_processor
+
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(allow_interruptions=config.allow_interruptions),
+            enable_rtvi=False,
+        )
+        runner = PipelineRunner()
+
+        async def _run() -> None:
+            await runner.run(task)
+
+        pipeline_task = asyncio.create_task(
+            _run(), name=f"pipeline_{session_id}"
+        )
+        state.task = pipeline_task
+
+        log.info("webrtc_pipeline_task_started", session_id=session_id)
+        e2e_start = time.perf_counter()
+        try:
+            await pipeline_task
+        except asyncio.CancelledError:
+            log.info("webrtc_pipeline_task_cancelled", session_id=session_id)
+        except Exception as exc:
+            log.error(
+                "webrtc_pipeline_task_error",
+                session_id=session_id,
+                error=str(exc),
+                exc_info=True,
+            )
+        finally:
+            e2e_ms = (time.perf_counter() - e2e_start) * 1000
+            _m = get_metrics()
+            if _m is not None:
+                _m.record_e2e_ms(e2e_ms)
+            state.info.status = "ended"
+            if recorder:
+                try:
+                    await recorder.finish()
+                except Exception as exc:
+                    log.warning(
+                        "call_recorder_finish_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            log.info("webrtc_pipeline_done", session_id=session_id)
 
     # ------------------------------------------------------------------
     # WebSocket runner

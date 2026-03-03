@@ -1,0 +1,22 @@
+{
+  "name": "@voice-saas/ai-call-sdk",
+  "version": "0.1.0",
+  "description": "Browser WebRTC / WebSocket voice-call client SDK for the AI Voice SaaS platform",
+  "type": "module",
+  "main": "ai-call-sdk.js",
+  "exports": {
+    ".": "./ai-call-sdk.js"
+  },
+  "files": [
+    "ai-call-sdk.js",
+    "README.md"
+  ],
+  "keywords": [
+    "webrtc",
+    "voice",
+    "ai",
+    "sip",
+    "sdk"
+  ],
+  "license": "MIT"
+}

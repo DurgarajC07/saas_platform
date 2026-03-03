@@ -121,6 +121,40 @@ class Settings(BaseSettings):
     RAG_SCORE_THRESHOLD: float = 0.6
     RAG_DEFAULT_TOP_K: int = 3
 
+    # ── Pipeline service ───────────────────────────────────────────────────
+    PIPELINE_SERVICE_URL: str = "http://localhost:7000"
+
+    # ── WebRTC / ICE ───────────────────────────────────────────────────────
+    # ICE_SERVERS: comma-separated STUN/TURN URLs served to browser clients.
+    # For production add a TURN entry:  turn:your-turn.server:3478
+    ICE_SERVERS: str = "stun:stun.l.google.com:19302"
+
+    # Optional TURN credentials (only needed when ICE_SERVERS contains TURN)
+    TURN_SERVER_URL: str = ""      # e.g. turn:coturn.example.com:3478
+    TURN_USERNAME: str = ""
+    TURN_CREDENTIAL: str = ""
+
+    @property
+    def ice_server_list(self) -> list[dict]:
+        """
+        Return a JSON-serialisable ICE server list for the browser SDK.
+
+        STUN entries are plain ``{"urls": "stun:..."}`` dicts.
+        If ``TURN_SERVER_URL`` is set a TURN entry with credentials is appended.
+        """
+        servers = [
+            {"urls": url.strip()}
+            for url in self.ICE_SERVERS.split(",")
+            if url.strip()
+        ]
+        if self.TURN_SERVER_URL:
+            servers.append({
+                "urls": self.TURN_SERVER_URL,
+                "username": self.TURN_USERNAME,
+                "credential": self.TURN_CREDENTIAL,
+            })
+        return servers
+
     # ── Helpers ────────────────────────────────────────────────────────────
     @property
     def is_production(self) -> bool:

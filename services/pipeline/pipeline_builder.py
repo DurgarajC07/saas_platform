@@ -247,3 +247,40 @@ class PipelineBuilder:
             slots=len(processors),
         )
         return pipeline
+
+    # ------------------------------------------------------------------
+    # WebRTC variant
+    # ------------------------------------------------------------------
+
+    async def build_for_webrtc(
+        self,
+        transport: Any,
+        on_transcription: Callable[[str, str | None], Awaitable[None]] | None = None,
+        recorder: Any | None = None,
+    ) -> Pipeline:
+        """
+        Assemble a pipeline backed by a ``WebRTCTransport``.
+
+        ``WebRTCTransport`` exposes ``.input()`` (→ ``WebRTCInputProcessor``)
+        and ``.output()`` (→ *self*) so it satisfies the duck-type contract
+        expected by the inner ``build()`` call.
+
+        Parameters
+        ----------
+        transport:
+            A ``WebRTCTransport`` instance (or any duck-type with compatible
+            ``.input()`` / ``.output()`` methods).
+        on_transcription, recorder:
+            Same semantics as in :meth:`build`.
+
+        Returns
+        -------
+        Pipeline
+        """
+        # Delegate to build() — WebRTCTransport.input() / .output() satisfy
+        # the same duck-type contract as FastAPIWebsocketTransport.
+        return await self.build(
+            transport,          # type: ignore[arg-type]
+            on_transcription=on_transcription,
+            recorder=recorder,
+        )
