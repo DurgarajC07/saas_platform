@@ -198,7 +198,12 @@ class PipelineBuilder:
 
         # ── 6. Tool executor ─────────────────────────────────────────
         if cfg.tools_json:
-            processors.append(ToolExecutorProcessor(tools_spec=cfg.tools_json))
+            processors.append(
+                ToolExecutorProcessor(
+                    tools_spec=cfg.tools_json,
+                    org_secrets=cfg.org_secrets,
+                )
+            )
             log.debug(
                 "pipeline_slot_enabled",
                 slot="tools",

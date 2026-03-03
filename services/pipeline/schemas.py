@@ -137,6 +137,7 @@ class AgentConfig(BaseModel):
     temperature: float      = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int         = Field(default=512,  ge=1, le=4096)
     tools_json: list[dict[str, Any]] | None = None  # OpenAI-compatible tool defs
+    org_secrets: dict[str, str] = Field(default_factory=dict)  # Pre-decrypted secrets for tool executor header/URL injection
     max_turns: int                              = Field(default=20, ge=1, le=100)
     prompt_context: PromptContext | None        = None   # Template vars resolved at call start
 

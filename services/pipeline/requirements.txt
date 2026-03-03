@@ -37,6 +37,9 @@ soundfile>=0.12.1
 #   Stage 1 RNNoise:      --build-arg INSTALL_RNNOISE=1        (~1 MB)
 #   Stage 2 DeepFilterNet:--build-arg INSTALL_DEEPFILTERNET=1  (~750 MB, pulls PyTorch)
 
+# ── SQL tool executor (optional — only needed when sql_query tools are defined) ─
+asyncpg>=0.30.0
+
 # ── Logging / validation ──────────────────────────────────────────────────────
 structlog>=24.4.0
 pydantic>=2.10.0
