@@ -46,6 +46,7 @@ dependencies = [
     "html2text>=2024.2.26",  # URL → Markdown text
     "youtube-transcript-api>=0.6.2",  # YouTube transcript ingestion
     "sse-starlette>=3.3.2",
+    "twilio>=9.10.2",
 ]
 
 [project.optional-dependencies]
