@@ -419,6 +419,26 @@ class AgentService:
         if not agent:
             raise NotFoundException(f"Agent {agent_id} not found")
 
+        # ── VRAM exhaustion protection ─────────────────────────────────────────
+        # Reject new calls before they reach the pipeline if VRAM is critically
+        # low (≥ 1.5 GB free required).
+        try:
+            import pynvml  # type: ignore[import]
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            free_mib = mem.free // (1024 * 1024)
+            if free_mib < 1500:
+                raise ServiceUnavailableException(
+                    f"Insufficient GPU memory ({free_mib} MiB free, 1500 MiB required). "
+                    "Try again shortly."
+                )
+        except ServiceUnavailableException:
+            raise
+        except Exception:
+            # pynvml unavailable or no GPU — proceed without blocking
+            pass
+
         settings = get_settings()
         pipeline_url: str = getattr(
             settings, "PIPELINE_SERVICE_URL", "http://localhost:7000"
@@ -514,6 +534,16 @@ class CallLogService:
     # ── Write (called by pipeline after session ends) ──────────────────────
 
     async def write_call_log(self, data: WriteCallLogRequest) -> CallLogResponse:
+        # ── PII detection ───────────────────────────────────────────────────
+        # Flag phone numbers, emails, credit cards and SSNs in the transcript.
+        # Flags are persisted in metadata_ — original PII is never re-extracted.
+        if data.transcript:
+            from app.core.utils.pii_detector import PIIDetector
+            meta = dict(data.metadata or {})
+            meta = PIIDetector.annotate_metadata(meta, data.transcript)
+        else:
+            meta = dict(data.metadata or {})
+
         log = await self.repo.create(
             agent_id=data.agent_id,
             org_id=data.org_id,
@@ -531,7 +561,7 @@ class CallLogService:
             stt_ms=data.stt_ms,
             llm_ttft_ms=data.llm_ttft_ms,
             tts_ttfb_ms=data.tts_ttfb_ms,
-            metadata_=data.metadata,
+            metadata_=meta,
             created_at=datetime.now(UTC),
         )
         logger.info(
@@ -560,7 +590,7 @@ class CallLogService:
                 f"{data.status}, {data.duration_sec or 0}s"
             ),
         )
-        # ── Publish webhook events & SSE notifications ──────────────────────
+        # ── Publish webhook events & SSE notifications ────────────────────────────────────────────
         if self.redis is not None:
             from app.modules.agents.events import (
                 publish_call_ended,
@@ -795,14 +825,18 @@ class TwilioCallService:
         phone_number: str,
         call_sid: str,
         from_number: str,
-        org_id: UUID,
+        org_id: UUID | None = None,
     ) -> str:
         """
         Process an inbound Twilio call webhook and return TwiML XML.
 
+        ``org_id`` is optional: Twilio webhooks carry no JWT, so the org is
+        derived from the agent record that owns the dialled phone number.
+
         Steps:
         1. Look up the ``AgentPhoneNumber`` record for this Twilio number.
-        2. Retrieve the associated ``Agent``.
+        2. Retrieve the associated ``Agent`` (by org_id when provided,
+           otherwise derive org_id from the phone record's agent).
         3. POST a new pipeline session using the agent config.
         4. Return ``<Connect><Stream>`` TwiML pointing at the pipeline WS.
         """
@@ -816,6 +850,17 @@ class TwilioCallService:
             return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
                 root, encoding="unicode"
             )
+
+        # Derive org_id from the agent when not supplied (no JWT in webhook)
+        if org_id is None:
+            raw = await self._agent_repo.get_by_id(phone_rec.agent_id)
+            if raw is None:
+                root = ET.Element("Response")
+                ET.SubElement(root, "Hangup")
+                return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+                    root, encoding="unicode"
+                )
+            org_id = raw.org_id
 
         agent = await self._agent_repo.get_by_id_and_org(phone_rec.agent_id, org_id)
         if not agent or not agent.is_active:

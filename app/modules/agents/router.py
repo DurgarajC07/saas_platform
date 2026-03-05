@@ -59,6 +59,7 @@ from app.modules.agents.schemas import (
     AgentAnalyticsResponse,
     AgentListResponse,
     AgentPhoneNumberResponse,
+    AgentPromptResponse,
     AgentResponse,
     AssignPhoneNumberRequest,
     CallLogListResponse,
@@ -81,6 +82,7 @@ from app.modules.agents.schemas import (
 )
 from app.modules.agents.service import AgentService, CallLogService, TwilioCallService
 from app.modules.agents.kb_service import KnowledgeBaseService
+from app.core.security.twilio_guard import TwilioSigned
 
 router = APIRouter()
 
@@ -284,9 +286,33 @@ async def webrtc_connect(
 # ── Prompt ───────────────────────────────────────────────────────────────────
 
 
+@router.get(
+    "/agents/{agent_id}/prompt",
+    response_model=AgentPromptResponse,
+    summary="Get system prompt (secure)",
+    tags=["Agents"],
+)
+async def get_prompt(
+    agent_id: UUID,
+    actor: AgentUpdateUser,
+    org_id: OrgID,
+    db: DB,
+) -> AgentPromptResponse:
+    """
+    Retrieve the current system prompt for an agent.
+
+    Requires ``agents.agent.update`` permission (elevated from read) because
+    the prompt is sensitive back-end configuration that should not be broadly
+    accessible.  Prompt content is never included in the standard
+    ``AgentResponse`` schema.
+    """
+    svc = AgentService(db)
+    return await svc.get_prompt(agent_id, org_id)
+
+
 @router.put(
     "/agents/{agent_id}/prompt",
-    response_model=AgentResponse,
+    response_model=AgentPromptResponse,
     summary="Update system prompt",
     tags=["Agents"],
 )
@@ -296,7 +322,7 @@ async def update_prompt(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
-) -> AgentResponse:
+) -> AgentPromptResponse:
     """Replace the agent's system prompt. Effective on the next call."""
     svc = AgentService(db)
     return await svc.update_prompt(agent_id, org_id, body)
@@ -644,31 +670,21 @@ async def get_recording_url(
 async def twilio_inbound_webhook(
     phone_number: str,
     request: Request,
-    org_id: OrgID,
     db: DB,
+    _sig: TwilioSigned,
 ) -> Response:
     """
     Twilio inbound-call webhook.
 
     Twilio POSTs here (form-encoded body) when a call arrives on a number
-    assigned to one of the organisation's agents.  The handler validates the
-    ``X-Twilio-Signature`` header, looks up the agent, creates a pipeline
-    session, and returns TwiML ``<Connect><Stream …/>`` XML.
+    assigned to one of the organisation's agents.  The ``TwilioSigned``
+    dependency validates the ``X-Twilio-Signature`` HMAC and returns HTTP 401
+    if the signature is absent or invalid.  This replaces the previous
+    optional-token check and makes validation mandatory in all environments.
     """
-    from app.config import get_settings
-
-    settings = get_settings()
     svc = TwilioCallService(db)
 
-    # Validate Twilio signature when a token is configured
-    if settings.TWILIO_AUTH_TOKEN:
-        sig = request.headers.get("X-Twilio-Signature", "")
-        form = await request.form()
-        params = dict(form)
-        url = str(request.url)
-        if not svc.validate_signature(url, params, sig):
-            return Response(content="Forbidden", status_code=403)
-
+    # Starlette caches the form after the TwilioSigned dependency reads it
     form = await request.form()
     call_sid: str = form.get("CallSid", "")
     from_number: str = form.get("From", "")
@@ -677,7 +693,7 @@ async def twilio_inbound_webhook(
         phone_number=phone_number,
         call_sid=call_sid,
         from_number=from_number,
-        org_id=org_id,
+        org_id=None,
     )
     return Response(content=twiml, media_type="application/xml")
 
@@ -690,7 +706,9 @@ async def twilio_inbound_webhook(
 )
 async def twilio_connect_callback(
     session_id: str,
+    request: Request,
     db: DB,
+    _sig: TwilioSigned,
 ) -> Response:
     """
     Outbound call TwiML connect callback.
@@ -698,6 +716,8 @@ async def twilio_connect_callback(
     Twilio calls this URL when the callee answers an outbound call.
     Returns the same ``<Connect><Stream>`` TwiML as inbound calls so the
     pipeline handles both directions identically.
+    Signature validation is enforced via the ``TwilioSigned`` dependency
+    (HTTP 401 on missing / invalid signature).
     """
     svc = TwilioCallService(db)
     twiml = svc._twiml_stream(session_id)

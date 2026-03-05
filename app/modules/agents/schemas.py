@@ -183,6 +183,15 @@ class UpdateAgentRequest(CamelModel):
 
 
 class AgentResponse(CamelModel):
+    """
+    Public agent representation.
+
+    ``system_prompt`` is intentionally **excluded** from this schema —
+    prompts are stored securely and never returned in list / detail responses.
+    Use ``GET /agents/{agent_id}/prompt`` (requires agent:manage permission)
+    to retrieve or edit the prompt.
+    """
+
     id: UUID
     org_id: UUID
     created_by: UUID | None = None
@@ -192,7 +201,7 @@ class AgentResponse(CamelModel):
     status: str
 
     llm_model: str
-    system_prompt: str | None = None
+    # system_prompt is deliberately absent — security hardening (16.3)
     temperature: float
     max_tokens: int
 
@@ -232,6 +241,19 @@ class AgentListResponse(CamelModel):
 
 
 # ── Prompt / Tools shortcuts ─────────────────────────────────────────────────
+
+class AgentPromptResponse(CamelModel):
+    """
+    Returned exclusively by the secure
+    ``GET /agents/{agent_id}/prompt`` and
+    ``PUT /agents/{agent_id}/prompt`` endpoints.
+
+    Requires agents.agent.manage permission.
+    """
+
+    agent_id: UUID
+    system_prompt: str | None
+
 
 class UpdatePromptRequest(CamelModel):
     system_prompt: str = Field(..., min_length=1)
