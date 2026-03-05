@@ -717,7 +717,7 @@ async def start_outbound_call(
     actor: Annotated[User, require("agents.agent.read")],
     org_id: OrgID,
     db: DB,
-    _feature: None = Depends(require_feature("ai.pstn.enabled")),
+    _feature: None = require_feature("ai.pstn.enabled"),
 ) -> OutboundCallResponse:
     """
     Initiate an outbound PSTN call from an agent to a phone number.
