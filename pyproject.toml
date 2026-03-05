@@ -77,6 +77,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "locust>=2.43.3",
     "numpy>=2.4.2",
     "websockets>=16.0",
 ]
