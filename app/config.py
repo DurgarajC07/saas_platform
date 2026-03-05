@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     # ── Pipeline service ───────────────────────────────────────────────────
     PIPELINE_SERVICE_URL: str = "http://localhost:7000"
 
+    # ── Twilio PSTN ────────────────────────────────────────────────────────
+    # Get these from https://console.twilio.com → Account Info
+    TWILIO_ACCOUNT_SID: str = ""          # AC…
+    TWILIO_AUTH_TOKEN: str = ""           # used for signature validation & REST API
+    # Your publicly reachable hostname (no scheme, no trailing slash)
+    # e.g. "api.example.com" or for local dev: use ngrok subdomain
+    PUBLIC_HOST: str = "localhost:8000"
+    PUBLIC_PROTOCOL: str = "https"        # http for local dev with ngrok http tunnels
+    # Internal WS base URL the saas_platform passes to the pipeline service
+    # when creating Twilio sessions so Twilio can reach the stream endpoint
+    PIPELINE_WS_PUBLIC_URL: str = "ws://localhost:7000"  # override with public wss:// in prod
+
     # ── WebRTC / ICE ───────────────────────────────────────────────────────
     # ICE_SERVERS: comma-separated STUN/TURN URLs served to browser clients.
     # For production add a TURN entry:  turn:your-turn.server:3478

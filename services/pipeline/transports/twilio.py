@@ -1,132 +1,208 @@
 """
-Twilio transport stub for the Pipeline Service.
+Twilio Media Streams transport for the Pipeline Service.
 
-Bridges a Pipecat pipeline to a Twilio PSTN call via a ``<Stream>`` TwiML
-verb (Media Streams).  Twilio sends audio over a WebSocket as µ-law (PCMU)
-8 kHz; this transport re-samples both directions to the pipeline's 16 kHz
-int16 PCM format.
+Bridges a Pipecat pipeline to a Twilio PSTN call via the ``<Stream>`` TwiML
+verb (Twilio Media Streams).
 
-Wire protocol (Twilio Media Streams)
--------------------------------------
-* Inbound (Twilio → Server):  JSON messages with ``event: media``,
-  ``media.payload`` as base64 PCMU 8 kHz.
-* Outbound (Server → Twilio): JSON ``{event:"media", streamSid:...,
-  media:{payload:<base64 PCMU 8kHz>}}``.
+Wire protocol (Twilio Media Streams over WebSocket)
+────────────────────────────────────────────────────
+Inbound  (Twilio → Server):
+  {"event": "connected", ...}
+  {"event": "start",     "streamSid": "MX…", "start": {"callSid": "CA…", ...}}
+  {"event": "media",     "streamSid": "MX…", "media": {"payload": "<base64 PCMU>"}}
+  {"event": "dtmf",      "streamSid": "MX…", "dtmf":  {"digit": "5", "finished": true}}
+  {"event": "stop",      "streamSid": "MX…"}
 
-Integration steps
------------------
-1. Configure a Twilio phone number with a Voice Webhook pointing to
-   ``/twilio/voice`` on this service's public URL.
-2. Reply with TwiML ``<Connect><Stream url="wss://..."/></Connect>``.
-3. A persistent WebSocket will be opened by Twilio to
-   ``/sessions/{id}/twilio_stream``.
+Outbound (Server → Twilio):
+  {"event": "media", "streamSid": "MX…", "media": {"payload": "<base64 PCMU>"}}
+  {"event": "clear", "streamSid": "MX…"}  ← flush Twilio playback buffer (barge-in)
+
+Audio codec
+───────────
+Twilio sends and receives µ-law (PCMU) at 8 kHz mono.  The pipeline operates
+at 16 kHz int16 PCM mono.  This transport handles all resampling/transcoding.
+
+Pipecat integration
+───────────────────
+``TwilioTransport`` follows the same ``input()`` / ``output()`` duck-type
+contract used by ``WebRTCTransport`` so ``PipelineBuilder.build()`` works
+unchanged::
+
+    transport = TwilioTransport(websocket)
+    pipeline  = await PipelineBuilder(cfg).build_for_twilio(transport, ...)
+
+``TwilioInputProcessor`` drains the async frame queue filled by
+``TwilioTransport.run_reader()`` and pushes frames into the pipeline.
+
+FreeSWITCH migration note
+──────────────────────────
+FreeSWITCH/mod_audio_stream sends the same µ-law 8 kHz frames over WebSocket
+(slightly different JSON envelope).  A ``FreeSwitchTransport`` extends this
+class, overriding only ``_parse_message()`` — zero pipeline changes needed.
 
 See Also
---------
+────────
 * https://www.twilio.com/docs/voice/twiml/stream
-* pipecat.transports.services.helpers.daily_rest (for reference patterns)
+* https://www.twilio.com/docs/voice/media-streams
 """
 from __future__ import annotations
 
-import audioop        # stdlib mulaw codec  (Python ≤ 3.12; use audioop-lts on 3.13+)
+# audioop was removed from the stdlib in Python 3.13.
+# audioop-lts is the backport for Python 3.13+.
+try:
+    import audioop                        # type: ignore[import]  # stdlib ≤ 3.12
+except ModuleNotFoundError:
+    import audioop_lts as audioop         # type: ignore[no-redef, import-not-found]
+
+import asyncio
 import base64
 import json
-import logging
-from typing import AsyncGenerator
+from asyncio import Queue
+from dataclasses import dataclass
 
 import structlog
 from fastapi import WebSocket
-from pipecat.frames.frames import AudioRawFrame, EndFrame
+from pipecat.frames.frames import AudioRawFrame, EndFrame, Frame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 log: structlog.BoundLogger = structlog.get_logger(__name__)
 
-_TWILIO_RATE = 8_000      # Twilio always sends 8 kHz PCMU
-_PIPELINE_RATE = 16_000   # pipeline operates at 16 kHz
+_TWILIO_RATE   = 8_000     # Twilio wire format: 8 kHz µ-law PCMU
+_PIPELINE_RATE = 16_000    # internal pipeline: 16 kHz int16 PCM
 
 
-def _mulaw_to_pcm16(payload_b64: str) -> bytes:
-    """Decode base64 µ-law 8 kHz → int16 PCM 8 kHz."""
-    mulaw_bytes = base64.b64decode(payload_b64)
-    pcm8 = audioop.ulaw2lin(mulaw_bytes, 2)   # int16 at 8 kHz
-    return pcm8
+# ── Custom frames ──────────────────────────────────────────────────────────────
+
+@dataclass
+class DTMFFrame(Frame):
+    """
+    A DTMF digit received from the caller (Twilio ``dtmf`` stream event).
+
+    Pushed by ``TwilioInputProcessor`` into the pipeline so that
+    ``DTMFRouter`` can intercept it for IVR menu routing.
+    """
+    digit: str = ""       # "0"-"9", "*", "#", "A"-"D"
+    finished: bool = True # True = key released; False = still held
 
 
-def _pcm8_to_16(pcm8: bytes) -> bytes:
-    """Up-sample int16 PCM from 8 kHz to 16 kHz (linear interpolation)."""
-    pcm16, _ = audioop.ratecv(
-        pcm8, 2, 1, _TWILIO_RATE, _PIPELINE_RATE, None
-    )
+@dataclass
+class TransferCallFrame(Frame):
+    """
+    Request the current call be cold- or warm-transferred to a destination.
+
+    Generated by ``DTMFRouter`` and consumed by the session manager's
+    post-pipeline hook to issue a Twilio Transfer REST call.
+    """
+    destination: str = ""       # E.164 phone number or agent slug
+    transfer_type: str = "cold" # "cold" (blind) or "warm" (supervised)
+
+
+@dataclass
+class ClearAudioFrame(Frame):
+    """
+    Instructs ``TwilioTransport`` to send a ``clear`` event to Twilio,
+    flushing its playback buffer (used for barge-in / interruption).
+    """
+    pass
+
+
+# ── Codec helpers ──────────────────────────────────────────────────────────────
+
+def _mulaw_to_pcm16k(payload_b64: str) -> bytes:
+    """Decode base64 µ-law 8 kHz → int16 PCM 16 kHz (pipeline-ready)."""
+    mulaw  = base64.b64decode(payload_b64)
+    pcm8   = audioop.ulaw2lin(mulaw, 2)                        # int16 @ 8 kHz
+    pcm16, _ = audioop.ratecv(pcm8, 2, 1, _TWILIO_RATE, _PIPELINE_RATE, None)
     return pcm16
 
 
-def _pcm16_to_8_mulaw(pcm16: bytes) -> bytes:
-    """Down-sample int16 PCM 16 kHz → 8 kHz, then encode as µ-law."""
-    pcm8, _ = audioop.ratecv(
-        pcm16, 2, 1, _PIPELINE_RATE, _TWILIO_RATE, None
-    )
-    return audioop.lin2ulaw(pcm8, 2)
+def _pcm16k_to_mulaw_b64(pcm16: bytes) -> str:
+    """Encode int16 PCM 16 kHz → base64 µ-law 8 kHz (Twilio wire format)."""
+    pcm8, _ = audioop.ratecv(pcm16, 2, 1, _PIPELINE_RATE, _TWILIO_RATE, None)
+    mulaw   = audioop.lin2ulaw(pcm8, 2)
+    return base64.b64encode(mulaw).decode()
 
+
+# ── Transport ──────────────────────────────────────────────────────────────────
 
 class TwilioTransport(FrameProcessor):
     """
-    Pipecat ``FrameProcessor`` wrapping a Twilio Media Stream WebSocket.
+    Pipecat transport backed by a Twilio Media Streams WebSocket.
 
-    * **Downstream**: reads Twilio ``media`` events, converts µ-law→PCM,
-      up-samples to 16 kHz, and pushes ``AudioRawFrame``.
-    * **Upstream**: accepts ``AudioRawFrame`` (16 kHz int16), down-samples
-      to 8 kHz, encodes as µ-law, and sends back to Twilio.
+    Lifecycle
+    ---------
+    1. Caller creates the transport:   ``t = TwilioTransport(ws)``
+    2. Caller starts the reader task:  ``reader = asyncio.create_task(t.run_reader())``
+    3. Pipeline is built:              ``build_for_twilio(t, ...)``
+    4. Pipeline runs until EndFrame or cancellation
+    5. Reader task is cancelled / ends naturally when Twilio sends ``stop``
     """
 
-    def __init__(self, websocket: WebSocket, stream_sid: str) -> None:
+    def __init__(self, websocket: WebSocket) -> None:
         super().__init__()
-        self._ws = websocket
-        self._stream_sid = stream_sid
-        self._active = True
+        self._ws         = websocket
+        self._stream_sid = ""     # captured from Twilio "start" event
+        self._call_sid   = ""     # captured from Twilio "start" event
+        self._active     = True
+        self._queue: Queue[AudioRawFrame | DTMFFrame | EndFrame] = Queue(maxsize=256)
 
-    # ------------------------------------------------------------------
-    # FrameProcessor
-    # ------------------------------------------------------------------
+    # ── Properties ──────────────────────────────────────────────────────
 
-    async def process_frame(
-        self, frame: object, direction: FrameDirection
-    ) -> None:
+    @property
+    def stream_sid(self) -> str:
+        return self._stream_sid
+
+    @property
+    def call_sid(self) -> str:
+        return self._call_sid
+
+    # ── Transport interface ──────────────────────────────────────────────
+
+    def input(self) -> "TwilioInputProcessor":  # noqa: A003
+        """Return the input processor — placed at the HEAD of the pipeline."""
+        return TwilioInputProcessor(self)
+
+    def output(self) -> "TwilioTransport":  # noqa: A003
+        """Return the output processor (self) — placed at the TAIL of the pipeline."""
+        return self
+
+    # ── Outbound FrameProcessor ──────────────────────────────────────────
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, EndFrame):
-            self._active = False
-            await self.push_frame(frame, direction)
+        if isinstance(frame, ClearAudioFrame):
+            # Barge-in: flush Twilio's playback buffer so the caller hears
+            # the new response immediately instead of the queued TTS audio.
+            if self._stream_sid:
+                await self._send_json({"event": "clear", "streamSid": self._stream_sid})
             return
 
-        if isinstance(frame, AudioRawFrame):
-            # Outbound: pipeline → Twilio
-            mulaw = _pcm16_to_8_mulaw(frame.audio)
-            payload = base64.b64encode(mulaw).decode()
-            msg = json.dumps(
-                {
+        if isinstance(frame, AudioRawFrame) and direction == FrameDirection.DOWNSTREAM:
+            if self._stream_sid and self._active:
+                payload = _pcm16k_to_mulaw_b64(frame.audio)
+                await self._send_json({
                     "event": "media",
                     "streamSid": self._stream_sid,
                     "media": {"payload": payload},
-                }
-            )
-            try:
-                await self._ws.send_text(msg)
-            except Exception as exc:
-                log.warning("twilio_send_error", error=str(exc))
+                })
             return
+
+        if isinstance(frame, EndFrame):
+            self._active = False
 
         await self.push_frame(frame, direction)
 
-    # ------------------------------------------------------------------
-    # Inbound reader
-    # ------------------------------------------------------------------
+    # ── Inbound reader (run as asyncio background task) ───────────────────
 
-    async def read_frames(self) -> AsyncGenerator[AudioRawFrame, None]:
+    async def run_reader(self) -> None:
         """
-        Yield ``AudioRawFrame`` objects decoded from Twilio's Media Stream.
+        Background coroutine: drains Twilio's WebSocket into ``_queue``.
 
-        Call this inside the pipeline's input loop.
+        Start this as an ``asyncio.Task`` before the pipeline begins.
+        The task ends naturally on ``stop`` / WS close, or when cancelled.
         """
+        log.info("twilio_reader_started")
         while self._active:
             try:
                 raw = await self._ws.receive_text()
@@ -134,22 +210,142 @@ class TwilioTransport(FrameProcessor):
                 log.info("twilio_ws_closed", reason=str(exc))
                 break
 
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+            frame = self._parse_message(raw)
+            if frame is not None:
+                try:
+                    self._queue.put_nowait(frame)
+                except asyncio.QueueFull:
+                    log.warning("twilio_queue_full", dropped=type(frame).__name__)
 
-            event = msg.get("event")
-            if event == "media":
-                payload = msg["media"]["payload"]
-                pcm8 = _mulaw_to_pcm16(payload)
-                pcm16 = _pcm8_to_16(pcm8)
-                yield AudioRawFrame(
-                    audio=pcm16,
+        # Signal pipeline termination
+        with contextlib.suppress(asyncio.QueueFull):
+            self._queue.put_nowait(EndFrame())
+        log.info("twilio_reader_stopped")
+
+    def _parse_message(
+        self, raw: str
+    ) -> "AudioRawFrame | DTMFFrame | EndFrame | None":
+        """Parse one Twilio Media Streams JSON message → pipeline frame."""
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+        event = msg.get("event", "")
+
+        if event == "start":
+            start = msg.get("start", {})
+            self._stream_sid = msg.get("streamSid", start.get("streamSid", ""))
+            self._call_sid   = start.get("callSid", "")
+            log.info(
+                "twilio_stream_started",
+                stream_sid=self._stream_sid,
+                call_sid=self._call_sid,
+            )
+            return None
+
+        if event == "media":
+            payload = msg.get("media", {}).get("payload", "")
+            if not payload:
+                return None
+            try:
+                return AudioRawFrame(
+                    audio=_mulaw_to_pcm16k(payload),
                     sample_rate=_PIPELINE_RATE,
                     num_channels=1,
                 )
-            elif event == "stop":
-                log.info("twilio_stream_stopped", stream_sid=self._stream_sid)
-                self._active = False
+            except Exception as exc:
+                log.warning("twilio_audio_decode_error", error=str(exc))
+                return None
+
+        if event == "dtmf":
+            dtmf   = msg.get("dtmf", {})
+            digit  = dtmf.get("digit", "")
+            if digit:
+                log.info("twilio_dtmf", digit=digit, stream_sid=self._stream_sid)
+                return DTMFFrame(digit=digit, finished=dtmf.get("finished", True))
+            return None
+
+        if event == "stop":
+            log.info("twilio_stream_stopped", stream_sid=self._stream_sid)
+            self._active = False
+            return EndFrame()
+
+        if event == "connected":
+            log.info(
+                "twilio_media_connected",
+                protocol=msg.get("protocol", ""),
+                version=msg.get("version", ""),
+            )
+            return None
+
+        # mark, status — silently ignore
+        return None
+
+    async def _send_json(self, payload: dict) -> None:
+        try:
+            await self._ws.send_text(json.dumps(payload))
+        except Exception as exc:
+            log.warning("twilio_send_error", error=str(exc))
+            self._active = False
+
+
+# ── Input processor ────────────────────────────────────────────────────────────
+
+class TwilioInputProcessor(FrameProcessor):
+    """
+    Head-of-pipeline processor that drains ``TwilioTransport._queue`` and
+    pushes ``AudioRawFrame`` / ``DTMFFrame`` / ``EndFrame`` downstream.
+
+    Starts the drain loop on first ``StartFrame`` (matching pipecat lifecycle).
+    """
+
+    def __init__(self, transport: TwilioTransport) -> None:
+        super().__init__()
+        self._transport = transport
+        self._drain_task: asyncio.Task | None = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        from pipecat.frames.frames import StartFrame
+        if isinstance(frame, StartFrame) and self._drain_task is None:
+            self._drain_task = asyncio.create_task(
+                self._drain(), name="twilio_input_drain"
+            )
+
+        await self.push_frame(frame, direction)
+
+    async def _drain(self) -> None:
+        """Continuously drain the queue and push frames downstream."""
+        log.debug("twilio_input_drain_started")
+        while True:
+            try:
+                frm = await asyncio.wait_for(
+                    self._transport._queue.get(), timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                if not self._transport._active and self._transport._queue.empty():
+                    break
+                continue
+            except asyncio.CancelledError:
                 break
+
+            await self.push_frame(frm, FrameDirection.DOWNSTREAM)
+
+            if isinstance(frm, EndFrame):
+                break
+
+        log.debug("twilio_input_drain_stopped")
+
+
+# ── Factory ────────────────────────────────────────────────────────────────────
+
+import contextlib  # noqa: E402 — placed after class defs to avoid forward-ref issues
+
+
+def make_twilio_transport(websocket: WebSocket) -> TwilioTransport:
+    """Create a ``TwilioTransport`` from a FastAPI WebSocket."""
+    t = TwilioTransport(websocket)
+    log.debug("twilio_transport_created")
+    return t

@@ -543,3 +543,134 @@ class SessionManager:
                         error=str(exc),
                     )
             log.info("pipeline_ws_loop_done", session_id=session_id)
+
+    # ── Twilio PSTN stream ─────────────────────────────────────────────────────
+
+    async def run_twilio_stream(self, session_id: str, ws: WebSocket) -> None:
+        """
+        Run the full pipeline lifecycle for a Twilio Media Streams WebSocket.
+
+        Twilio connects here after the SaaS platform's TwiML webhook returns
+        ``<Connect><Stream url="wss://…/sessions/{id}/twilio_stream"/></Connect>``.
+
+        Parameters
+        ----------
+        session_id:
+            Session created by ``create()`` (transport="twilio").
+        ws:
+            Already-accepted FastAPI WebSocket from Twilio.
+        """
+        from transports.twilio import make_twilio_transport
+
+        state = self._sessions.get(session_id)
+        if state is None:
+            log.warning("twilio_stream_session_not_found", session_id=session_id)
+            await ws.close(code=4404)
+            return
+
+        # Concurrency gate
+        active_running = sum(
+            1 for s in self._sessions.values()
+            if s.info.status == "active"
+        )
+        if active_running >= self.MAX_CONCURRENT_CALLS:
+            log.warning(
+                "twilio_capacity_reached",
+                active=active_running,
+                session_id=session_id,
+            )
+            # Can't send busy text over Twilio WS — just close it so
+            # Twilio falls through to the next <Say> or <Hangup> in TwiML.
+            await ws.close(code=1013)  # 1013 = Try Again Later
+            return
+
+        state.info.status = "active"
+        config = state.config
+
+        # ── Build transport ───────────────────────────────────────────────
+        transport = make_twilio_transport(ws)
+
+        # ── Start inbound reader (fills transport queue in the background) ─
+        reader_task = asyncio.create_task(
+            transport.run_reader(), name=f"twilio_reader_{session_id}"
+        )
+
+        # ── Language-adaptive TTS (same as run_ws) ────────────────────────
+        async def _on_transcription(text: str, language: str | None) -> None:
+            if not language or state.detected_language == language:
+                return
+            state.detected_language = language
+            log.info("twilio_language_detected", session_id=session_id, language=language)
+            if state.tts_processor is not None:
+                voice = LANGUAGE_VOICE_MAP.get(language, config.tts_voice)
+                state.tts_processor.set_voice(voice, language)
+
+        # ── Call recorder ─────────────────────────────────────────────────
+        recorder = None
+        try:
+            recorder = CallRecorder(
+                session_id=session_id,
+                call_id=state.info.call_id,
+                organization_id=str(config.organization_id),
+            )
+            await recorder.start()
+            state.recorder = recorder
+        except Exception as exc:
+            log.warning("twilio_call_recorder_start_failed", session_id=session_id, error=str(exc))
+
+        # ── Build pipeline ─────────────────────────────────────────────────
+        builder  = PipelineBuilder(config)
+        pipeline = await builder.build_for_twilio(
+            transport, on_transcription=_on_transcription, recorder=recorder
+        )
+        state.tts_processor = builder.tts_processor
+
+        # ── Run pipeline ───────────────────────────────────────────────────
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(allow_interruptions=config.allow_interruptions),
+            enable_rtvi=False,
+        )
+        runner = PipelineRunner()
+        pipeline_task = asyncio.create_task(
+            runner.run(task), name=f"twilio_pipeline_{session_id}"
+        )
+        state.task = pipeline_task
+        log.info("twilio_pipeline_started", session_id=session_id)
+
+        e2e_start = time.perf_counter()
+        try:
+            await pipeline_task
+        except asyncio.CancelledError:
+            log.info("twilio_pipeline_cancelled", session_id=session_id)
+        except Exception as exc:
+            log.error(
+                "twilio_pipeline_error",
+                session_id=session_id,
+                error=str(exc),
+                exc_info=True,
+            )
+        finally:
+            # Cancel reader if still running
+            if not reader_task.done():
+                reader_task.cancel()
+                try:
+                    await reader_task
+                except asyncio.CancelledError:
+                    pass
+
+            e2e_ms = (time.perf_counter() - e2e_start) * 1000
+            _m = get_metrics()
+            if _m is not None:
+                _m.record_e2e_ms(e2e_ms)
+            state.info.status = "ended"
+            if recorder:
+                try:
+                    await recorder.finish()
+                except Exception as exc:
+                    log.warning(
+                        "twilio_recorder_finish_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            log.info("twilio_pipeline_loop_done", session_id=session_id)

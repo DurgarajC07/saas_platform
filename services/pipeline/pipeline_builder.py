@@ -284,3 +284,67 @@ class PipelineBuilder:
             on_transcription=on_transcription,
             recorder=recorder,
         )
+
+    # ------------------------------------------------------------------
+    # Twilio PSTN variant
+    # ------------------------------------------------------------------
+
+    async def build_for_twilio(
+        self,
+        transport: Any,
+        on_transcription: Callable[[str, str | None], Awaitable[None]] | None = None,
+        recorder: Any | None = None,
+    ) -> Pipeline:
+        """
+        Assemble a pipeline backed by a ``TwilioTransport``.
+
+        Inserts a ``DTMFRouter`` immediately after the input processor when
+        the agent config has a ``dtmf_routing_map`` (IVR mode).  For plain
+        conversational PSTN agents the build is identical to ``build()``.
+
+        Parameters
+        ----------
+        transport:
+            A ``TwilioTransport`` instance.
+        on_transcription, recorder:
+            Same semantics as in :meth:`build`.
+        """
+        from processors.dtmf import DTMFRouter
+        from transports.twilio import DTMFFrame, TransferCallFrame  # noqa: F401
+
+        cfg = self._cfg
+
+        # Build the base pipeline (noise → VAD → STT → RAG → LLM → tools → TTS → output)
+        pipeline = await self.build(
+            transport,          # type: ignore[arg-type]
+            on_transcription=on_transcription,
+            recorder=recorder,
+        )
+
+        # If a DTMF routing map is configured, splice the DTMFRouter into the
+        # pipeline after the input processor (index 0 = transport.input()).
+        if cfg.dtmf_routing_map:
+            # Convert list-of-2 entries to proper (action, dest) tuples
+            routing: dict[str, tuple[str, str | None]] = {}
+            for digit, entry in cfg.dtmf_routing_map.items():
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    routing[digit] = (str(entry[0]), entry[1] if entry[1] else None)
+                elif isinstance(entry, (list, tuple)) and len(entry) == 1:
+                    routing[digit] = (str(entry[0]), None)
+
+            router = DTMFRouter(
+                routing_map=routing,
+                operator_number=cfg.operator_number,
+            )
+            # Splice after input (index 0); Pipeline stores processors as a list.
+            # We rebuild the processor list with DTMFRouter in position 1.
+            procs = list(pipeline.processors)  # type: ignore[attr-defined]
+            procs.insert(1, router)
+            pipeline = Pipeline(procs)
+            log.info(
+                "dtmf_router_spliced",
+                agent_id=str(cfg.agent_id),
+                routes=list(routing.keys()),
+            )
+
+        return pipeline

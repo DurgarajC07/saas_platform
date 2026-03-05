@@ -166,7 +166,15 @@ class AgentConfig(BaseModel):
 
     # ── Interruption / barge-in ───────────────────────────────────────────────
     allow_interruptions: bool    = True
-    barge_in_threshold: float    = Field(default=0.3, ge=0.0, le=1.0)
+    barge_in_threshold: float    = Field(default=0.3, ge=0.0, le=2.0)
+
+    # ── IVR / DTMF (Twilio PSTN only) ───────────────────────────────────────────
+    # Maps DTMF digit → [action, destination_or_null].
+    # action: "transfer" | "hangup" | "repeat" | "operator" | "none"
+    # destination: E.164 number for "transfer", null for others.
+    # Example: {"1": ["transfer", "+15550001"], "0": ["operator", null], "#": ["hangup", null]}
+    dtmf_routing_map: dict[str, list] | None = None
+    operator_number: str = ""   # default transfer target for "operator" action
 
     @field_validator("agent_type", mode="before")
     @classmethod

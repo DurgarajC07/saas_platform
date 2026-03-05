@@ -30,6 +30,10 @@ aioboto3>=13.0.0
 numpy>=1.26.0
 websockets>=13.0.0
 soundfile>=0.12.1
+# audioop-lts backports stdlib audioop for Python >= 3.13 (removed in 3.13)
+# The Dockerfile uses Python 3.11 where audioop is stdlib; this is a guard
+# for future Python version upgrades.
+audioop-lts>=0.2.1
 
 # ── Noise removal ───────────────────────────────────────────────────────────────
 # Both noise processors fail-open when their library is absent.

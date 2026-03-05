@@ -524,3 +524,36 @@ class CallMinutesUsageResponse(CamelModel):
         default="ai.calls.minutes",
         description="The feature key governing this quota.",
     )
+
+
+# ── Twilio PSTN / outbound calls ──────────────────────────────────────────────
+
+class OutboundCallRequest(CamelModel):
+    """Payload for initiating an outbound PSTN call via Twilio."""
+
+    to_number: str = Field(
+        description="Destination phone number in E.164 format (e.g. +15551234567)."
+    )
+    from_number: str | None = Field(
+        default=None,
+        description=(
+            "Caller-ID override in E.164 format.  When omitted the first phone "
+            "number assigned to the agent is used."
+        ),
+    )
+    metadata: dict = Field(
+        default_factory=dict,
+        description="Arbitrary key/value pairs forwarded to the pipeline session.",
+    )
+
+
+class OutboundCallResponse(CamelModel):
+    """Returned by the outbound-call endpoint once Twilio queues the call."""
+
+    call_sid: str = Field(description="Twilio CallSid for tracking / cancellation.")
+    session_id: str = Field(description="Pipeline session ID created for this call.")
+    from_number: str = Field(description="Caller-ID used for the outbound call.")
+    status: str = Field(
+        default="queued",
+        description="Initial Twilio call status (typically 'queued').",
+    )

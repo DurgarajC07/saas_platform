@@ -278,3 +278,36 @@ async def webrtc_offer(
         session_id=session_id,
         ice_servers=ice_servers_for_client(),
     )
+
+
+# ── Twilio Media Streams WebSocket ────────────────────────────────────────────
+
+@app.websocket("/sessions/{session_id}/twilio_stream")
+async def twilio_stream(session_id: str, ws: WebSocket) -> None:
+    """
+    Twilio Media Streams persistent WebSocket endpoint.
+
+    Twilio connects here when the SaaS platform's inbound TwiML webhook
+    responds with::
+
+        <Response>
+          <Connect>
+            <Stream url="wss://<host>/sessions/{session_id}/twilio_stream"/>
+          </Connect>
+        </Response>
+
+    The same endpoint is used for both inbound (Twilio -> agent) and outbound
+    (agent -> Twilio click-to-call) sessions.
+
+    Audio codec: Twilio sends mu-law 8 kHz PCMU; ``TwilioTransport`` handles
+    the conversion to/from the pipeline's 16 kHz int16 PCM format.
+    """
+    await ws.accept()
+    if not _session_manager:
+        await ws.close(code=1011)
+        return
+    session = _session_manager.get(session_id)
+    if not session:
+        await ws.close(code=4404)
+        return
+    await _session_manager.run_twilio_stream(session_id, ws)

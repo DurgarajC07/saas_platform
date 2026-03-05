@@ -26,11 +26,20 @@ from __future__ import annotations
 import math
 import re
 import secrets
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
+
+try:
+    from twilio.request_validator import RequestValidator as _TwilioRequestValidator
+    from twilio.rest import Client as _TwilioClient
+    _TWILIO_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _TWILIO_AVAILABLE = False
 
 from app.config import get_settings
 from app.core.exceptions import ConflictException, NotFoundException
@@ -51,6 +60,8 @@ from app.modules.agents.schemas import (
     CallLogResponse,
     CreateAgentRequest,
     LatencyStats,
+    OutboundCallRequest,
+    OutboundCallResponse,
     RecordingUrlResponse,
     TestCallResponse,
     UpdateAgentRequest,
@@ -666,3 +677,245 @@ class CallLogService:
         expires_at = datetime.now(UTC) + timedelta(hours=1)
         # TODO: generate MinIO presigned URL using minio-py when integrated
         return RecordingUrlResponse(url=log.recording_url, expires_at=expires_at)
+
+
+# ── Twilio PSTN service ───────────────────────────────────────────────────────
+
+class TwilioCallService:
+    """
+    Handles Twilio PSTN inbound / outbound call orchestration.
+
+    Responsibilities:
+    * Validate Twilio request signatures (inbound webhooks).
+    * Look up the agent assigned to a phone number.
+    * Create a pipeline session via the internal pipeline HTTP API.
+    * Generate TwiML ``<Connect><Stream>`` responses.
+    * Initiate outbound calls via the Twilio REST API.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.settings = get_settings()
+        self._phone_repo = AgentPhoneNumberRepository(session)
+        self._agent_repo = AgentRepository(session)
+        self._audit = AuditService(session)
+        self.log = logger.bind(service="TwilioCallService")
+
+    # ── signature validation ──────────────────────────────────────────────
+
+    def validate_signature(
+        self,
+        url: str,
+        params: dict,
+        signature: str,
+    ) -> bool:
+        """Return True when the X-Twilio-Signature header is valid."""
+        if not _TWILIO_AVAILABLE:
+            raise RuntimeError("twilio package not installed")
+        validator = _TwilioRequestValidator(self.settings.TWILIO_AUTH_TOKEN)
+        return validator.validate(url, params, signature)
+
+    # ── TwiML helpers ─────────────────────────────────────────────────────
+
+    def _twiml_stream(self, session_id: str) -> str:
+        """
+        Return TwiML that connects Twilio to the pipeline Media Streams WS.
+
+        Example output::
+
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+              <Connect>
+                <Stream url="wss://pipeline.example.com/sessions/{id}/twilio_stream"/>
+              </Connect>
+            </Response>
+        """
+        ws_url = (
+            self.settings.PIPELINE_WS_PUBLIC_URL.rstrip("/")
+            + f"/sessions/{session_id}/twilio_stream"
+        )
+        root = ET.Element("Response")
+        connect = ET.SubElement(root, "Connect")
+        ET.SubElement(connect, "Stream", url=ws_url)
+        return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+            root, encoding="unicode"
+        )
+
+    def _twiml_connect_callback(self, session_id: str) -> str:
+        """
+        TwiML URL returned to Twilio for outbound calls.
+
+        Twilio calls this URL when the callee answers; it responds with
+        the ``<Connect><Stream>`` TwiML that wires the call into the pipeline.
+        """
+        base = (
+            f"{self.settings.PUBLIC_PROTOCOL}://{self.settings.PUBLIC_HOST}"
+        )
+        return f"{base}/api/v1/webhooks/twilio/connect/{session_id}"
+
+    # ── inbound call handling ─────────────────────────────────────────────
+
+    async def handle_inbound(
+        self,
+        phone_number: str,
+        call_sid: str,
+        from_number: str,
+        org_id: UUID,
+    ) -> str:
+        """
+        Process an inbound Twilio call webhook and return TwiML XML.
+
+        Steps:
+        1. Look up the ``AgentPhoneNumber`` record for this Twilio number.
+        2. Retrieve the associated ``Agent``.
+        3. POST a new pipeline session using the agent config.
+        4. Return ``<Connect><Stream>`` TwiML pointing at the pipeline WS.
+        """
+        phone_rec = await self._phone_repo.get_by_number(phone_number)
+        if not phone_rec:
+            self.log.warning("inbound_call.unknown_number", number=phone_number)
+            # Return a polite goodbye so callers aren't left in silence
+            root = ET.Element("Response")
+            ET.SubElement(root, "Say").text = "This number is not configured."
+            ET.SubElement(root, "Hangup")
+            return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+                root, encoding="unicode"
+            )
+
+        agent = await self._agent_repo.get_by_id_and_org(phone_rec.agent_id, org_id)
+        if not agent or not agent.is_active:
+            root = ET.Element("Response")
+            ET.SubElement(root, "Hangup")
+            return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+                root, encoding="unicode"
+            )
+
+        session_id = await self._create_pipeline_session(agent, call_sid, from_number)
+
+        await self._audit.log(
+            action="twilio.inbound_call",
+            resource_type="agent",
+            resource_id=str(agent.id),
+            org_id=org_id,
+            metadata={"call_sid": call_sid, "from": from_number, "session_id": session_id},
+        )
+
+        self.log.info(
+            "inbound_call.session_created",
+            session_id=session_id,
+            agent_id=str(agent.id),
+        )
+        return self._twiml_stream(session_id)
+
+    # ── outbound call ─────────────────────────────────────────────────────
+
+    async def start_outbound_call(
+        self,
+        agent_id: UUID,
+        org_id: UUID,
+        data: OutboundCallRequest,
+        actor_id: UUID,
+    ) -> OutboundCallResponse:
+        """
+        Initiate an outbound PSTN call via the Twilio REST API.
+
+        Steps:
+        1. Validate agent ownership + active status.
+        2. Resolve caller-ID (override or first assigned number).
+        3. POST a pipeline session.
+        4. Build the TwiML callback URL (``/webhooks/twilio/connect/{session_id}``).
+        5. Call ``twilio.rest.Client.calls.create()``.
+        """
+        if not _TWILIO_AVAILABLE:
+            raise RuntimeError("twilio package not installed")
+
+        agent = await self._agent_repo.get_by_id_and_org(agent_id, org_id)
+        if not agent:
+            raise NotFoundException(f"Agent {agent_id} not found")
+        if not agent.is_active:
+            raise ConflictException("Agent is not active")
+
+        # Resolve caller-ID
+        from_number = data.from_number
+        if not from_number:
+            numbers = await self._phone_repo.list_by_agent(agent_id)
+            if not numbers:
+                raise ConflictException("Agent has no assigned phone numbers")
+            from_number = numbers[0].phone_number
+
+        # Create pipeline session before dialling so the WS endpoint exists
+        # before Twilio connects to it.
+        session_id = await self._create_pipeline_session(
+            agent,
+            call_sid="pending",
+            from_number=data.to_number,
+            metadata={"direction": "outbound", **data.metadata},
+        )
+
+        connect_url = self._twiml_connect_callback(session_id)
+
+        client = _TwilioClient(
+            self.settings.TWILIO_ACCOUNT_SID,
+            self.settings.TWILIO_AUTH_TOKEN,
+        )
+        call = client.calls.create(
+            to=data.to_number,
+            from_=from_number,
+            url=connect_url,
+        )
+
+        await self._audit.log(
+            action="twilio.outbound_call",
+            resource_type="agent",
+            resource_id=str(agent.id),
+            org_id=org_id,
+            actor_id=actor_id,
+            metadata={"call_sid": call.sid, "to": data.to_number, "session_id": session_id},
+        )
+
+        self.log.info(
+            "outbound_call.initiated",
+            call_sid=call.sid,
+            session_id=session_id,
+            to=data.to_number,
+        )
+        return OutboundCallResponse(
+            call_sid=call.sid,
+            session_id=session_id,
+            from_number=from_number,
+            status=call.status,
+        )
+
+    # ── internal helpers ──────────────────────────────────────────────────
+
+    async def _create_pipeline_session(
+        self,
+        agent: Agent,
+        call_sid: str,
+        from_number: str,
+        metadata: dict | None = None,
+    ) -> str:
+        """POST /sessions to the pipeline service and return the session_id."""
+        payload: dict = {
+            "agentId": str(agent.id),
+            "systemPrompt": agent.system_prompt or "",
+            "voiceId": agent.voice_id or "alloy",
+            "language": agent.language or "en",
+            "transport": "twilio",
+            "metadata": {
+                "callSid": call_sid,
+                "callerNumber": from_number,
+                **(metadata or {}),
+            },
+        }
+        if agent.tools_json:
+            payload["tools"] = agent.tools_json
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                self.settings.PIPELINE_SERVICE_URL.rstrip("/") + "/sessions",
+                json=payload,
+            )
+            resp.raise_for_status()
+
+        return resp.json()["session_id"]

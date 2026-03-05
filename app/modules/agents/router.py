@@ -29,6 +29,12 @@ Registered in main.py at prefix /api/v1 so routes resolve to:
   GET    /api/v1/calls/{call_id}                     Single call detail
   GET    /api/v1/calls/{call_id}/recording           Presigned recording URL
 
+  Twilio PSTN
+  ────────────────────────────────────────────────────────────────────────
+  POST   /api/v1/webhooks/twilio/inbound/{phone_number}  Twilio inbound webhook
+  POST   /api/v1/webhooks/twilio/connect/{session_id}   TwiML connect callback
+  POST   /api/v1/agents/{agent_id}/calls/outbound        Initiate outbound call
+
 All endpoints require a valid JWT (Bearer token) and an org context header.
 RBAC permissions: agents.<resource>.<action>
 """
@@ -39,7 +45,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
 
@@ -62,6 +68,8 @@ from app.modules.agents.schemas import (
     KbDeleteDocResponse,
     KbDocumentListResponse,
     KbUploadResponse,
+    OutboundCallRequest,
+    OutboundCallResponse,
     RecordingUrlResponse,
     TestCallResponse,
     UpdateAgentRequest,
@@ -71,7 +79,7 @@ from app.modules.agents.schemas import (
     WebRTCOfferRequest,
     WriteCallLogRequest,
 )
-from app.modules.agents.service import AgentService, CallLogService
+from app.modules.agents.service import AgentService, CallLogService, TwilioCallService
 from app.modules.agents.kb_service import KnowledgeBaseService
 
 router = APIRouter()
@@ -623,3 +631,107 @@ async def get_recording_url(
     """
     svc = CallLogService(db)
     return await svc.get_recording_url(call_id, org_id)
+
+
+# ── Twilio PSTN endpoints ─────────────────────────────────────────────────────
+
+@router.post(
+    "/webhooks/twilio/inbound/{phone_number}",
+    response_class=Response,
+    include_in_schema=False,  # public webhook – no JWT
+    tags=["Twilio"],
+)
+async def twilio_inbound_webhook(
+    phone_number: str,
+    request: Request,
+    org_id: OrgID,
+    db: DB,
+) -> Response:
+    """
+    Twilio inbound-call webhook.
+
+    Twilio POSTs here (form-encoded body) when a call arrives on a number
+    assigned to one of the organisation's agents.  The handler validates the
+    ``X-Twilio-Signature`` header, looks up the agent, creates a pipeline
+    session, and returns TwiML ``<Connect><Stream …/>`` XML.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    svc = TwilioCallService(db)
+
+    # Validate Twilio signature when a token is configured
+    if settings.TWILIO_AUTH_TOKEN:
+        sig = request.headers.get("X-Twilio-Signature", "")
+        form = await request.form()
+        params = dict(form)
+        url = str(request.url)
+        if not svc.validate_signature(url, params, sig):
+            return Response(content="Forbidden", status_code=403)
+
+    form = await request.form()
+    call_sid: str = form.get("CallSid", "")
+    from_number: str = form.get("From", "")
+
+    twiml = await svc.handle_inbound(
+        phone_number=phone_number,
+        call_sid=call_sid,
+        from_number=from_number,
+        org_id=org_id,
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post(
+    "/webhooks/twilio/connect/{session_id}",
+    response_class=Response,
+    include_in_schema=False,  # called by Twilio for outbound connect
+    tags=["Twilio"],
+)
+async def twilio_connect_callback(
+    session_id: str,
+    db: DB,
+) -> Response:
+    """
+    Outbound call TwiML connect callback.
+
+    Twilio calls this URL when the callee answers an outbound call.
+    Returns the same ``<Connect><Stream>`` TwiML as inbound calls so the
+    pipeline handles both directions identically.
+    """
+    svc = TwilioCallService(db)
+    twiml = svc._twiml_stream(session_id)
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post(
+    "/agents/{agent_id}/calls/outbound",
+    response_model=OutboundCallResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Initiate outbound call",
+    tags=["Twilio"],
+)
+async def start_outbound_call(
+    agent_id: UUID,
+    body: OutboundCallRequest,
+    actor: Annotated[User, require("agents.agent.read")],
+    org_id: OrgID,
+    db: DB,
+    _feature: None = Depends(require_feature("ai.pstn.enabled")),
+) -> OutboundCallResponse:
+    """
+    Initiate an outbound PSTN call from an agent to a phone number.
+
+    The agent must have at least one Twilio phone number assigned, and the
+    organisation must have the ``ai.pstn.enabled`` feature flag enabled.
+
+    Returns the Twilio ``CallSid``, pipeline ``session_id``, and the
+    caller-ID used so the client can track or cancel the call.
+    """
+    svc = TwilioCallService(db)
+    return await svc.start_outbound_call(
+        agent_id=agent_id,
+        org_id=org_id,
+        data=body,
+        actor_id=actor.id,
+    )
