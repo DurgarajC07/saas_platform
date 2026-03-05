@@ -490,3 +490,37 @@ class KbDeleteDocResponse(CamelModel):
     doc_id: UUID
     chunks_deleted: int
     message: str
+
+
+# ── Usage / quota dashboard ───────────────────────────────────────────────────
+
+class CallMinutesUsageResponse(CamelModel):
+    """
+    Organisation's AI call-minute consumption for the current calendar month.
+
+    ``allowed_minutes = null`` means the plan has an unlimited quota.
+    ``percent_used = null`` when quota is unlimited.
+    """
+
+    org_id: UUID
+    billing_period: str = Field(
+        description="Current billing month in YYYY-MM format."
+    )
+    used_minutes: int = Field(ge=0, description="Call minutes consumed this month.")
+    used_seconds: int = Field(ge=0, description="Raw seconds consumed (for precision).")
+    allowed_minutes: int | None = Field(
+        default=None,
+        description="Monthly minute cap from plan. null = unlimited.",
+    )
+    remaining_minutes: int | None = Field(
+        default=None,
+        description="Minutes remaining before cap is hit. null = unlimited.",
+    )
+    percent_used: float | None = Field(
+        default=None,
+        description="Percentage of quota consumed (0-100). null = unlimited.",
+    )
+    plan_feature_key: str = Field(
+        default="ai.calls.minutes",
+        description="The feature key governing this quota.",
+    )

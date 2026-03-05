@@ -178,6 +178,11 @@ PERMISSIONS: list[tuple[str, str, str]] = [
     ("agents", "call_log", "read"),
     ("agents", "call_log", "list"),
     ("agents", "analytics", "read"),
+    # ── Agents — Day 13 additions ──────────────────────────────────────────
+    ("agents", "tools", "manage"),         # PUT  /agents/{id}/tools
+    ("agents", "usage", "read"),           # GET  /agents/usage/minutes
+    ("agents", "admin", "models"),         # Enterprise: override LLM model config
+    ("agents", "call", "export"),          # Export call logs to CSV/JSON
 ]
 
 

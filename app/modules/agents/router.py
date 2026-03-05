@@ -35,16 +35,20 @@ RBAC permissions: agents.<resource>.<action>
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
+import redis.asyncio as aioredis
 
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_redis
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
+from app.modules.features.dependencies import require_feature
 from app.modules.rbac.dependencies import get_current_org_id, require
+from app.modules.agents.credits import CallCreditService
 from app.modules.agents.schemas import (
     AgentAnalyticsResponse,
     AgentListResponse,
@@ -53,6 +57,7 @@ from app.modules.agents.schemas import (
     AssignPhoneNumberRequest,
     CallLogListResponse,
     CallLogResponse,
+    CallMinutesUsageResponse,
     CreateAgentRequest,
     KbDeleteDocResponse,
     KbDocumentListResponse,
@@ -76,6 +81,7 @@ router = APIRouter()
 CurrentUser = Annotated[User, Depends(get_current_user)]
 OrgID = Annotated[UUID, Depends(get_current_org_id)]
 DB = Annotated[AsyncSession, Depends(get_db)]
+Redis = Annotated[aioredis.Redis, Depends(get_redis)]
 
 # Permission-guarded user aliases
 AgentCreateUser = Annotated[User, require("agents.agent.create")]
@@ -85,6 +91,7 @@ AgentDeleteUser = Annotated[User, require("agents.agent.delete")]
 AgentListUser = Annotated[User, require("agents.agent.list")]
 CallLogWriteUser = Annotated[User, require("agents.call_log.create")]
 CallLogReadUser = Annotated[User, require("agents.call_log.read")]
+UsageReadUser = Annotated[User, require("agents.usage.read")]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -104,6 +111,7 @@ async def create_agent(
     actor: AgentCreateUser,
     org_id: OrgID,
     db: DB,
+    _feat: None = require_feature("ai.agents.create"),
 ) -> AgentResponse:
     """
     Create a new AI voice-agent with full pipeline configuration.
@@ -178,7 +186,7 @@ async def update_agent(
     their current value.  The pipeline picks up changes on the next call.
     """
     svc = AgentService(db)
-    return await svc.update_agent(agent_id, org_id, body)
+    return await svc.update_agent(agent_id, org_id, body, actor=actor)
 
 
 @router.delete(
@@ -200,7 +208,7 @@ async def delete_agent(
     Deleted agents are excluded from the list endpoint.
     """
     svc = AgentService(db)
-    await svc.delete_agent(agent_id, org_id)
+    await svc.delete_agent(agent_id, org_id, actor=actor)
 
 
 # ── Test call ────────────────────────────────────────────────────────────────
@@ -244,6 +252,7 @@ async def webrtc_connect(
     actor: AgentReadUser,
     org_id: OrgID,
     db: DB,
+    _feat: None = require_feature("ai.webrtc.enabled"),
 ) -> WebRTCConnectResponse:
     """
     Exchange an SDP offer/answer with the pipeline service to establish a
@@ -301,6 +310,7 @@ async def assign_phone_number(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
+    _feat: None = require_feature("ai.pstn.enabled"),
 ) -> AgentPhoneNumberResponse:
     """Associate an E.164 phone number with the agent."""
     svc = AgentService(db)
@@ -341,6 +351,7 @@ async def upload_knowledge_base(
     db: DB,
     file: UploadFile = File(..., description="Document to ingest (PDF, DOCX, TXT, MD, CSV)"),
     source_url: str | None = Query(default=None, description="Source URL for url/youtube types"),
+    _feat: None = require_feature("ai.rag.enabled"),
 ) -> KbUploadResponse:
     """
     Upload a document and queue it for ingestion into the agent's Qdrant
@@ -372,6 +383,7 @@ async def list_knowledge_base(
     org_id: OrgID,
     db: DB,
     kb_status: str | None = Query(default=None, alias="status"),
+    _feat: None = require_feature("ai.rag.enabled"),
 ) -> KbDocumentListResponse:
     """
     Return all documents in the agent's knowledge base with their ingestion
@@ -393,6 +405,7 @@ async def delete_kb_document(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
+    _feat: None = require_feature("ai.rag.enabled"),
 ) -> KbDeleteDocResponse:
     """
     Remove a single document from the agent's knowledge base.
@@ -415,6 +428,7 @@ async def clear_knowledge_base(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
+    _feat: None = require_feature("ai.rag.enabled"),
 ) -> None:
     """
     Drop the agent's entire Qdrant collection and remove all knowledge-base
@@ -439,10 +453,57 @@ async def update_tools(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
+    _feat: None = require_feature("ai.tools.enabled"),
 ) -> AgentResponse:
     """Replace the full OpenAI-format tool definition array for the agent."""
     svc = AgentService(db)
-    return await svc.update_tools(agent_id, org_id, body)
+    return await svc.update_tools(agent_id, org_id, body, actor=actor)
+
+
+# ── Usage / quota dashboard ───────────────────────────────────────────────────
+
+
+@router.get(
+    "/agents/usage/minutes",
+    response_model=CallMinutesUsageResponse,
+    summary="Organisation call-minute usage dashboard",
+    tags=["Agents"],
+)
+async def get_minutes_usage(
+    actor: UsageReadUser,
+    org_id: OrgID,
+    db: DB,
+    redis: Redis,
+) -> CallMinutesUsageResponse:
+    """
+    Return the organisation's AI call-minute consumption for the current
+    calendar month and the plan's monthly limit.
+
+    ``allowed_minutes = null`` means the plan has an unlimited quota.
+    Intended for dashboard widgets and pre-call quota warnings.
+    """
+    svc = CallCreditService(db, redis)
+    usage = await svc.get_usage(org_id)
+
+    used_seconds = int(await redis.get(f"call_minutes:{org_id}:{datetime.now(UTC).strftime('%Y-%m')}") or 0)
+    allowed = usage.allowed_minutes
+
+    if allowed is not None and allowed > 0:
+        remaining: int | None = max(0, allowed - usage.used_minutes)
+        percent: float | None = round(min(usage.used_minutes / allowed * 100, 100.0), 1)
+    else:
+        remaining = None
+        percent = None
+
+    return CallMinutesUsageResponse(
+        org_id=org_id,
+        billing_period=datetime.now(UTC).strftime("%Y-%m"),
+        used_minutes=usage.used_minutes,
+        used_seconds=used_seconds,
+        allowed_minutes=allowed,
+        remaining_minutes=remaining,
+        percent_used=percent,
+    )
 
 
 # ── Call history & analytics ─────────────────────────────────────────────────

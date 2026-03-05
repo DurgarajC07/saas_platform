@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.exceptions import ConflictException, NotFoundException
+from app.modules.audit.service import AuditService
 from app.modules.agents.models import Agent, AgentPhoneNumber, CallLog
 from app.modules.agents.repository import (
     AgentPhoneNumberRepository,
@@ -101,6 +102,7 @@ class AgentService:
         self.session = session
         self.repo = AgentRepository(session)
         self.phone_repo = AgentPhoneNumberRepository(session)
+        self._audit = AuditService(session)
 
     # ── Create ─────────────────────────────────────────────────────────────
 
@@ -153,6 +155,15 @@ class AgentService:
             org_id=str(org_id),
             slug=slug,
         )
+        await self._audit.log(
+            action="agent.created",
+            resource_type="agent",
+            resource_id=str(agent.id),
+            org_id=org_id,
+            actor_user_id=creator.id,
+            new_values={"name": data.name, "slug": slug, "agent_type": str(data.agent_type)},
+            description=f"Created agent '{data.name}' (slug={slug})",
+        )
         return AgentResponse.model_validate(agent)
 
     # ── Read ───────────────────────────────────────────────────────────────
@@ -201,6 +212,7 @@ class AgentService:
         agent_id: UUID,
         org_id: UUID,
         data: UpdateAgentRequest,
+        actor: User | None = None,
     ) -> AgentResponse:
         agent = await self.repo.get_by_id_and_org(agent_id, org_id)
         if not agent:
@@ -227,16 +239,39 @@ class AgentService:
 
         updated = await self.repo.update(agent_id, **patch)
         logger.info("agent.updated", agent_id=str(agent_id), fields=list(patch.keys()))
+        await self._audit.log(
+            action="agent.updated",
+            resource_type="agent",
+            resource_id=str(agent_id),
+            org_id=org_id,
+            actor_user_id=actor.id if actor else None,
+            new_values={"fields_changed": list(patch.keys())},
+            description=f"Updated agent fields: {', '.join(patch.keys())}",
+        )
         return AgentResponse.model_validate(updated)
 
     # ── Delete ─────────────────────────────────────────────────────────────
 
-    async def delete_agent(self, agent_id: UUID, org_id: UUID) -> None:
+    async def delete_agent(
+        self,
+        agent_id: UUID,
+        org_id: UUID,
+        actor: User | None = None,
+    ) -> None:
         agent = await self.repo.get_by_id_and_org(agent_id, org_id)
         if not agent:
             raise NotFoundException(f"Agent {agent_id} not found")
         await self.repo.soft_delete(agent_id)
         logger.info("agent.deleted", agent_id=str(agent_id))
+        await self._audit.log(
+            action="agent.deleted",
+            resource_type="agent",
+            resource_id=str(agent_id),
+            org_id=org_id,
+            actor_user_id=actor.id if actor else None,
+            old_values={"name": agent.name, "slug": agent.slug},
+            description=f"Soft-deleted agent '{agent.name}' (id={agent_id})",
+        )
 
     # ── Prompt / Tools shortcuts ───────────────────────────────────────────
 
@@ -258,6 +293,7 @@ class AgentService:
         agent_id: UUID,
         org_id: UUID,
         data: UpdateToolsRequest,
+        actor: User | None = None,
     ) -> AgentResponse:
         agent = await self.repo.get_by_id_and_org(agent_id, org_id)
         if not agent:
@@ -267,6 +303,15 @@ class AgentService:
             "agent.tools_updated",
             agent_id=str(agent_id),
             tool_count=len(data.tools_json),
+        )
+        await self._audit.log(
+            action="agent.tools_updated",
+            resource_type="agent",
+            resource_id=str(agent_id),
+            org_id=org_id,
+            actor_user_id=actor.id if actor else None,
+            new_values={"tool_count": len(data.tools_json)},
+            description=f"Replaced tool definitions ({len(data.tools_json)} tools)",
         )
         return AgentResponse.model_validate(updated)
 
@@ -452,6 +497,7 @@ class CallLogService:
         self.session = session
         self.repo = CallLogRepository(session)
         self.agent_repo = AgentRepository(session)
+        self._audit = AuditService(session)
 
     # ── Write (called by pipeline after session ends) ──────────────────────
 
@@ -482,6 +528,25 @@ class CallLogService:
             agent_id=str(data.agent_id),
             status=data.status,
             duration_sec=data.duration_sec,
+        )
+        await self._audit.log(
+            action="agent.call.completed",
+            resource_type="call",
+            resource_id=str(log.id),
+            org_id=data.org_id,
+            actor_user_id=None,
+            actor_type="system",
+            new_values={
+                "agent_id": str(data.agent_id),
+                "status": data.status,
+                "duration_sec": data.duration_sec,
+                "direction": str(data.direction),
+                "transport": str(data.transport),
+            },
+            description=(
+                f"Call {data.direction} via {data.transport} — "
+                f"{data.status}, {data.duration_sec or 0}s"
+            ),
         )
         return CallLogResponse.model_validate(log)
 
