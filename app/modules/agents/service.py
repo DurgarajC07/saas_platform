@@ -504,8 +504,9 @@ class AgentService:
 
 
 class CallLogService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, redis=None) -> None:
         self.session = session
+        self.redis = redis
         self.repo = CallLogRepository(session)
         self.agent_repo = AgentRepository(session)
         self._audit = AuditService(session)
@@ -559,6 +560,40 @@ class CallLogService:
                 f"{data.status}, {data.duration_sec or 0}s"
             ),
         )
+        # ── Publish webhook events & SSE notifications ──────────────────────
+        if self.redis is not None:
+            from app.modules.agents.events import (
+                publish_call_ended,
+                publish_call_failed,
+                publish_call_started,
+            )
+            status_str = str(data.status).lower() if data.status else ""
+            if status_str == "connected":
+                await publish_call_started(
+                    self.session, self.redis,
+                    org_id=data.org_id,
+                    agent_id=data.agent_id,
+                    call_id=log.id,
+                    direction=str(data.direction),
+                    transport=str(data.transport),
+                )
+            elif status_str == "completed":
+                await publish_call_ended(
+                    self.session, self.redis,
+                    org_id=data.org_id,
+                    agent_id=data.agent_id,
+                    call_id=log.id,
+                    duration_sec=data.duration_sec,
+                    recording_url=data.recording_url,
+                )
+            elif status_str in ("failed", "no-answer"):
+                await publish_call_failed(
+                    self.session, self.redis,
+                    org_id=data.org_id,
+                    agent_id=data.agent_id,
+                    call_id=log.id,
+                    reason=status_str,
+                )
         return CallLogResponse.model_validate(log)
 
     # ── Read ───────────────────────────────────────────────────────────────

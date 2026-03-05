@@ -130,5 +130,8 @@ def _register_routers(app: FastAPI) -> None:
     from app.modules.agents.router import router as agents_router
     app.include_router(agents_router, prefix="/api/v1", tags=["Agents"])
 
+    from app.modules.dashboard.router import router as dashboard_router
+    app.include_router(dashboard_router, prefix="/api/v1", tags=["Dashboard"])
+
 
 app = create_application()

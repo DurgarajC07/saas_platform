@@ -42,6 +42,12 @@ python-slugify>=8.0.4
 # Twilio PSTN — outbound call API, TwiML generation, signature validation
 twilio>=9.0.0
 
+# Real-time SSE streaming (live call monitor)
+sse-starlette>=2.1.0
+
+# GPU metrics (graceful no-op when NVIDIA hardware is absent)
+pynvml>=11.5.0
+
 # RAG / knowledge base
 qdrant-client>=1.12.0
 fastembed>=0.4.0
