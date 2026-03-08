@@ -200,6 +200,28 @@ services:
     restart: "no"
     profiles: [seed]
 
+  # ── Frontend (React + nginx) ────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api/v1
+        VITE_APP_ENV: production
+    image: voicesaas-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [saas-net]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
 volumes:
   pgdata:
   redisdata:

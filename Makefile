@@ -2,7 +2,9 @@
         docker-up docker-down \
         infra-up infra-down infra-logs infra-ps infra-build infra-restart \
         nvidia-docker-setup \
-        whisper-test tts-test qdrant-test ws-test
+        whisper-test tts-test qdrant-test ws-test \
+        frontend-install frontend-dev frontend-build frontend-preview \
+        frontend-lint frontend-test frontend-typecheck frontend-up
 
 help: ## Show help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -189,3 +191,34 @@ nvidia-docker-setup: ## Install and configure NVIDIA Container Toolkit for Docke
 	@echo ""
 	@echo "Verifying..."
 	docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Frontend  (React 19 + Vite + pnpm)
+#  Requires: Node 20+ and pnpm (npm i -g pnpm  or  corepack enable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FRONTEND_DIR := frontend
+
+frontend-install: ## Install frontend dependencies with pnpm
+	cd $(FRONTEND_DIR) && pnpm install
+
+frontend-dev: ## Start frontend dev server  →  http://localhost:5173
+	cd $(FRONTEND_DIR) && pnpm dev
+
+frontend-build: ## Build frontend for production (output: frontend/dist/)
+	cd $(FRONTEND_DIR) && pnpm build
+
+frontend-preview: ## Preview production build locally  →  http://localhost:4173
+	cd $(FRONTEND_DIR) && pnpm preview
+
+frontend-lint: ## Lint frontend TypeScript/JSX with ESLint
+	cd $(FRONTEND_DIR) && pnpm lint
+
+frontend-test: ## Run frontend unit tests with Vitest
+	cd $(FRONTEND_DIR) && pnpm test
+
+frontend-typecheck: ## Run TypeScript type-check (no emit)
+	cd $(FRONTEND_DIR) && pnpm typecheck
+
+frontend-up: ## Start frontend dev container via docker compose
+	docker compose up -d --build frontend
