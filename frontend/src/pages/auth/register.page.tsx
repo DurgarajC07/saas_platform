@@ -32,23 +32,28 @@ export function RegisterPage() {
 
         <form onSubmit={handleSubmit((data) => register_.mutate(data))}>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="first_name">First name</Label>
-                <Input id="first_name" placeholder="Alice" {...register('first_name')} />
-                {errors.first_name && <p className="text-xs text-destructive">{errors.first_name.message}</p>}
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="last_name">Last name</Label>
-                <Input id="last_name" placeholder="Smith" {...register('last_name')} />
-                {errors.last_name && <p className="text-xs text-destructive">{errors.last_name.message}</p>}
-              </div>
+            <div className="space-y-2">
+              <Label htmlFor="fullName">Full name</Label>
+              <Input id="fullName" placeholder="Alice Smith" {...register('fullName')} />
+              {errors.fullName && <p className="text-xs text-destructive">{errors.fullName.message}</p>}
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input id="email" type="email" placeholder="alice@example.com" {...register('email')} />
               {errors.email && <p className="text-xs text-destructive">{errors.email.message}</p>}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="orgName">Organisation name</Label>
+              <Input id="orgName" placeholder="Acme Inc." {...register('orgName')} />
+              {errors.orgName && <p className="text-xs text-destructive">{errors.orgName.message}</p>}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="orgSlug">Subdomain / slug</Label>
+              <Input id="orgSlug" placeholder="acme" {...register('orgSlug')} />
+              {errors.orgSlug && <p className="text-xs text-destructive">{errors.orgSlug.message}</p>}
             </div>
 
             <div className="space-y-2">

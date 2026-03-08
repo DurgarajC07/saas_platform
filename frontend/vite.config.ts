@@ -1,7 +1,7 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import path from 'path'
+import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [
@@ -10,7 +10,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': resolve(__dirname, 'src'),
     },
   },
   server: {
@@ -19,7 +19,7 @@ export default defineConfig({
     proxy: {
       // Proxy /api calls to the FastAPI backend during dev
       '/api': {
-        target: process.env.VITE_API_TARGET ?? 'http://localhost:8000',
+        target: 'http://localhost:8000',
         changeOrigin: true,
       },
     },

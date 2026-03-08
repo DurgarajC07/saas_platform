@@ -39,14 +39,14 @@ export function ResetPasswordPage() {
         <form onSubmit={handleSubmit((data) => reset.mutate(data))}>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="password">New password</Label>
-              <Input id="password" type="password" placeholder="••••••••" {...register('password')} />
-              {errors.password && <p className="text-xs text-destructive">{errors.password.message}</p>}
+              <Label htmlFor="newPassword">New password</Label>
+              <Input id="newPassword" type="password" placeholder="••••••••" {...register('newPassword')} />
+              {errors.newPassword && <p className="text-xs text-destructive">{errors.newPassword.message}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="confirm_password">Confirm password</Label>
-              <Input id="confirm_password" type="password" placeholder="••••••••" {...register('confirm_password')} />
-              {errors.confirm_password && <p className="text-xs text-destructive">{errors.confirm_password.message}</p>}
+              <Label htmlFor="confirmPassword">Confirm password</Label>
+              <Input id="confirmPassword" type="password" placeholder="••••••••" {...register('confirmPassword')} />
+              {errors.confirmPassword && <p className="text-xs text-destructive">{errors.confirmPassword.message}</p>}
             </div>
           </CardContent>
           <CardFooter>

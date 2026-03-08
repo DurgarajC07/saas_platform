@@ -2,7 +2,7 @@ import { Link, useRouterState } from '@tanstack/react-router'
 import {
   LayoutDashboard, Bot, PhoneCall, CreditCard, Users, Shield,
   Key, Webhook, FileText, Bell, Settings, ChevronLeft, ChevronRight,
-  Activity, Lock, User, BarChart3, Cpu, Sliders,
+  Activity, Lock, BarChart3, Cpu, Sliders,
 } from 'lucide-react'
 import { cn }              from '@/shared/lib/utils'
 import { useRootStore }    from '@/app/store'
