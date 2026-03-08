@@ -29,9 +29,11 @@ export function TopBar() {
         <div className="group relative">
           <button className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-accent transition-colors">
             <div className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
-              {(user?.fullName[0] ?? 'U').toUpperCase()}
+              {(user?.displayName?.[0] ?? user?.firstName?.[0] ?? 'U').toUpperCase()}
             </div>
-            <span className="hidden sm:block max-w-32 truncate">{user?.fullName ?? 'User'}</span>
+            <span className="hidden sm:block max-w-32 truncate">
+              {user?.displayName ?? user?.firstName ?? 'User'}
+            </span>
             <ChevronDown className="size-3 text-muted-foreground" />
           </button>
 

@@ -18,8 +18,8 @@ export function useCurrentUser() {
   const token = useAuthStore((s) => s.token)
   return useQuery({
     queryKey: queryKeys.auth.me(),
-    queryFn:  authApi.me,
-    enabled:  Boolean(token),
+    queryFn: authApi.me,
+    enabled: Boolean(token),
     staleTime: 5 * 60 * 1000,
   })
 }
@@ -27,19 +27,23 @@ export function useCurrentUser() {
 // ─── useLogin ────────────────────────────────────────────────────────────────
 export function useLogin() {
   const { setAuth } = useAuthStore()
-  const navigate    = useNavigate()
-  const qc          = useQueryClient()
+  const navigate = useNavigate()
+  const qc = useQueryClient()
 
   return useMutation({
     mutationFn: (body: LoginInput) => authApi.login(body),
     onSuccess: (data) => {
-      setAuth(data.accessToken, data.refreshToken, data.user)
-      qc.setQueryData(queryKeys.auth.me(), data.user)
-      void navigate({ to: '/' })
+      if ('userId' in data) {
+        // 2FA required — stash the userId and send to 2FA verify page
+        sessionStorage.setItem('2fa_user_id', data.userId)
+        void navigate({ to: '/auth/2fa-verify' })
+        return
+      }
+      setAuth(data)
+      void qc.invalidateQueries({ queryKey: queryKeys.auth.me() })
+      void navigate({ to: '/dashboard' })
     },
-    onError: (err) => {
-      toast.error(getErrorMessage(err))
-    },
+    // errors shown inline on form via form.setError('root', …)
   })
 }
 
@@ -53,18 +57,18 @@ export function useRegister() {
       toast.success('Account created! Check your email to verify.')
       void navigate({ to: '/auth/login' })
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
+    // errors shown inline on form
   })
 }
 
 // ─── useLogout ───────────────────────────────────────────────────────────────
 export function useLogout() {
-  const { logout }  = useAuthStore()
-  const navigate    = useNavigate()
-  const qc          = useQueryClient()
+  const { logout, refreshToken } = useAuthStore()
+  const navigate = useNavigate()
+  const qc = useQueryClient()
 
   return useMutation({
-    mutationFn: authApi.logout,
+    mutationFn: () => authApi.logout(refreshToken),
     onSettled: () => {
       logout()
       qc.clear()
@@ -78,7 +82,17 @@ export function useForgotPassword() {
   return useMutation({
     mutationFn: (body: ForgotPasswordInput) => authApi.forgotPassword(body),
     onSuccess: () => toast.success('Reset link sent! Check your inbox.'),
-    onError:   (err) => toast.error(getErrorMessage(err)),
+    // errors shown inline on form
+  })
+}
+
+// ─── useVerifyEmail ───────────────────────────────────────────────────────────
+export function useVerifyEmail(token: string) {
+  return useQuery({
+    queryKey: ['auth', 'verify-email', token],
+    queryFn: () => authApi.verifyEmail(token),
+    enabled: Boolean(token),
+    retry: false,
   })
 }
 
@@ -92,7 +106,7 @@ export function useResetPassword() {
       toast.success('Password reset! You can log in now.')
       void navigate({ to: '/auth/login' })
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
+    // errors shown inline on form
   })
 }
 
@@ -101,7 +115,7 @@ export function useChangePassword() {
   return useMutation({
     mutationFn: (body: ChangePasswordInput) => authApi.changePassword(body),
     onSuccess: () => toast.success('Password changed successfully.'),
-    onError:   (err) => toast.error(getErrorMessage(err)),
+    onError: (err) => toast.error(getErrorMessage(err)),
   })
 }
 
@@ -109,7 +123,7 @@ export function useChangePassword() {
 export function use2FASetup() {
   return useMutation({
     mutationFn: authApi.setup2FA,
-    onError:    (err) => toast.error(getErrorMessage(err)),
+    onError: (err) => toast.error(getErrorMessage(err)),
   })
 }
 
@@ -129,15 +143,17 @@ export function use2FAConfirm() {
 // ─── use2FAVerify (login-time 2FA step) ─────────────────────────────────────
 export function use2FAVerify() {
   const { setAuth } = useAuthStore()
-  const navigate    = useNavigate()
-  const qc          = useQueryClient()
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+
   return useMutation({
-    mutationFn: ({ mfaToken, code }: { mfaToken: string; code: string }) =>
-      authApi.verify2FA(mfaToken, code),
+    mutationFn: ({ userId, code }: { userId: string; code: string }) =>
+      authApi.verify2FA(userId, code),
     onSuccess: (data) => {
-      setAuth(data.accessToken, data.refreshToken, data.user)
-      qc.setQueryData(queryKeys.auth.me(), data.user)
-      void navigate({ to: '/' })
+      setAuth(data)
+      void qc.invalidateQueries({ queryKey: queryKeys.auth.me() })
+      sessionStorage.removeItem('2fa_user_id')
+      void navigate({ to: '/dashboard' })
     },
     onError: (err) => toast.error(getErrorMessage(err)),
   })
@@ -147,7 +163,7 @@ export function use2FAVerify() {
 export function useSessions() {
   return useQuery({
     queryKey: ['auth', 'sessions'],
-    queryFn:  authApi.getSessions,
+    queryFn: authApi.getSessions,
   })
 }
 

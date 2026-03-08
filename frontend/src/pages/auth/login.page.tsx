@@ -4,6 +4,7 @@ import { Link } from '@tanstack/react-router'
 import { Bot } from 'lucide-react'
 import { useLogin } from '@/features/auth/hooks'
 import { loginSchema, type LoginInput } from '@/features/auth/schemas'
+import { getErrorMessage } from '@/shared/api/error-handler'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
@@ -22,6 +23,7 @@ export function LoginPage() {
   const {
     register,
     handleSubmit,
+    setError,
     formState: { errors },
   } = useForm<LoginInput>({ resolver: zodResolver(loginSchema) })
 
@@ -45,11 +47,21 @@ export function LoginPage() {
         <form
           onSubmit={(e) => {
             void handleSubmit((data) => {
-              login.mutate(data)
+              login.mutate(data, {
+                onError: (err) => {
+                  setError('root', { message: getErrorMessage(err) })
+                },
+              })
             })(e)
           }}
         >
           <CardContent className="space-y-4">
+            {errors.root && (
+              <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {errors.root.message}
+              </p>
+            )}
+
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input

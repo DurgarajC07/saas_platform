@@ -80,10 +80,10 @@ import { SystemSettingsPage } from '@/pages/admin/system-settings.page'
 // Auth guard
 // ─────────────────────────────────────────────────────────────────────────────
 function requireAuth() {
-  const token = useAuthStore.getState().token
-  if (!token) {
-    redirect({ to: '/auth/login' })
-    return
+  const isAuthenticated = useAuthStore.getState().isAuthenticated
+  if (!isAuthenticated) {
+    // eslint-disable-next-line @typescript-eslint/only-throw-error
+    throw redirect({ to: '/auth/login' })
   }
 }
 

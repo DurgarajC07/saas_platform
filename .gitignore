@@ -1,3 +1,7 @@
+# Husky / lint-staged (CI hooks — not needed in repo)
+.husky/
+frontend/.husky/
+
 __pycache__/
 *.py[cod]
 *.egg-info/

@@ -1,22 +1,23 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { type UserResponse } from './schemas'
+import type { UserResponse, TokenResponse } from './schemas'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State shape
 // ─────────────────────────────────────────────────────────────────────────────
 interface AuthState {
-  token:        string | null
+  token: string | null
   refreshToken: string | null
-  orgId:        string | null
-  user:         UserResponse | null
+  orgId: string | null
+  user: UserResponse | null
+  isAuthenticated: boolean
 
   // Actions
-  setAuth:      (token: string, refreshToken: string, user: UserResponse) => void
-  setTokens:    (token: string, refreshToken: string) => void
-  setOrgId:     (orgId: string) => void
-  setUser:      (user: UserResponse) => void
-  logout:       () => void
+  setAuth: (data: TokenResponse) => void
+  setTokens: (token: string, refreshToken: string) => void
+  setOrg: (orgId: string) => void
+  setUser: (user: UserResponse) => void
+  logout: () => void
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,38 +26,44 @@ interface AuthState {
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
-      token:        null,
+      token: null,
       refreshToken: null,
-      orgId:        null,
-      user:         null,
+      orgId: null,
+      user: null,
+      isAuthenticated: false,
 
-      setAuth: (token, refreshToken, user) =>
-        set({ token, refreshToken, user }),
+      setAuth: (data) =>
+        set({
+          token: data.accessToken,
+          refreshToken: data.refreshToken,
+          isAuthenticated: true,
+        }),
 
-      setTokens: (token, refreshToken) =>
-        set({ token, refreshToken }),
+      setTokens: (token, refreshToken) => set({ token, refreshToken }),
 
-      setOrgId: (orgId) => set({ orgId }),
+      setOrg: (orgId) => set({ orgId }),
 
       setUser: (user) => set({ user }),
 
       logout: () =>
-        set({ token: null, refreshToken: null, orgId: null, user: null }),
+        set({ token: null, refreshToken: null, orgId: null, user: null, isAuthenticated: false }),
     }),
     {
-      name:    'auth',
+      name: 'auth-storage',
       storage: createJSONStorage(() => localStorage),
       partialize: (s) => ({
-        token:        s.token,
+        token: s.token,
         refreshToken: s.refreshToken,
-        orgId:        s.orgId,
-        user:         s.user,
+        orgId: s.orgId,
+        user: s.user,
+        isAuthenticated: s.isAuthenticated,
       }),
     },
   ),
 )
 
 // ── Convenience selectors ─────────────────────────────────────────────────────
-export const selectIsAuthenticated = (s: AuthState) => Boolean(s.token)
-export const selectUser            = (s: AuthState) => s.user
-export const selectIsSuperuser     = (s: AuthState) => s.user?.isSuperuser ?? false
+export const selectIsAuthenticated = (s: AuthState) => s.isAuthenticated
+export const selectUser = (s: AuthState) => s.user
+export const selectOrgId = (s: AuthState) => s.orgId
+export const selectIsPlatformAdmin = (s: AuthState) => s.user?.isPlatformAdmin ?? false

@@ -1,10 +1,12 @@
-import { useForm } from 'react-hook-form'
+import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { Link } from '@tanstack/react-router'
+import { ShieldCheck } from 'lucide-react'
 import { use2FAVerify } from '@/features/auth/hooks'
 import { twoFACodeSchema, type TwoFACodeInput } from '@/features/auth/schemas'
+import { getErrorMessage } from '@/shared/api/error-handler'
 import { Button } from '@/shared/components/ui/button'
-import { Input } from '@/shared/components/ui/input'
-import { Label } from '@/shared/components/ui/label'
+import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/shared/components/ui/input-otp'
 import {
   Card,
   CardContent,
@@ -13,20 +15,28 @@ import {
   CardHeader,
   CardTitle,
 } from '@/shared/components/ui/card'
-import { ShieldCheck } from 'lucide-react'
 
 export function TwoFAVerifyPage() {
   const verify = use2FAVerify()
 
   const {
-    register,
+    control,
     handleSubmit,
+    setError,
     formState: { errors },
   } = useForm<TwoFACodeInput>({ resolver: zodResolver(twoFACodeSchema) })
 
   const onSubmit = (data: TwoFACodeInput) => {
-    const mfaToken = sessionStorage.getItem('mfa_token') ?? ''
-    verify.mutate({ mfaToken, code: data.code })
+    const userId = sessionStorage.getItem('2fa_user_id') ?? null
+    if (!userId) return
+    verify.mutate(
+      { userId, code: data.code },
+      {
+        onError: (err) => {
+          setError('root', { message: getErrorMessage(err) })
+        },
+      },
+    )
   }
 
   return (
@@ -39,28 +49,43 @@ export function TwoFAVerifyPage() {
           <CardTitle>Two-factor authentication</CardTitle>
           <CardDescription>Enter the 6-digit code from your authenticator app.</CardDescription>
         </CardHeader>
+
         <form
           onSubmit={(e) => {
             void handleSubmit(onSubmit)(e)
           }}
         >
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="code">Verification code</Label>
-              <Input
-                id="code"
-                placeholder="000000"
-                maxLength={6}
-                className="text-center text-2xl tracking-widest"
-                {...register('code')}
-              />
-              {errors.code && <p className="text-xs text-destructive">{errors.code.message}</p>}
-            </div>
+          <CardContent className="flex flex-col items-center gap-4">
+            {errors.root && (
+              <p className="w-full rounded-md bg-destructive/10 px-3 py-2 text-center text-sm text-destructive">
+                {errors.root.message}
+              </p>
+            )}
+
+            <Controller
+              name="code"
+              control={control}
+              render={({ field }) => (
+                <InputOTP maxLength={6} value={field.value} onChange={field.onChange} autoFocus>
+                  <InputOTPGroup>
+                    {[0, 1, 2, 3, 4, 5].map((i) => (
+                      <InputOTPSlot key={i} index={i} className="size-12 text-lg" />
+                    ))}
+                  </InputOTPGroup>
+                </InputOTP>
+              )}
+            />
+
+            {errors.code && <p className="text-sm text-destructive">{errors.code.message}</p>}
           </CardContent>
-          <CardFooter>
+
+          <CardFooter className="flex-col gap-3">
             <Button className="w-full" type="submit" loading={verify.isPending}>
               Verify
             </Button>
+            <Link to="/auth/login" className="text-xs text-muted-foreground hover:text-primary">
+              Use a different account
+            </Link>
           </CardFooter>
         </form>
       </Card>

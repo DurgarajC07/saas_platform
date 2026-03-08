@@ -5,7 +5,8 @@ import {
   type ForgotPasswordInput,
   type ResetPasswordInput,
   type ChangePasswordInput,
-  type AuthResponse,
+  type TokenResponse,
+  type TwoFactorChallengeResponse,
   type UserResponse,
   type SessionResponse,
 } from './schemas'
@@ -24,32 +25,43 @@ interface Setup2FAResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const authApi = {
-  /** POST /auth/login */
-  login: async (body: LoginInput): Promise<AuthResponse> => {
-    const { data } = await apiClient.post<AuthResponse>('/auth/login', body)
+  /** POST /auth/login — returns tokens on success, or 2FA challenge */
+  login: async (body: LoginInput): Promise<TokenResponse | TwoFactorChallengeResponse> => {
+    const { data } = await apiClient.post<TokenResponse | TwoFactorChallengeResponse>(
+      '/auth/login',
+      body,
+    )
     return data
   },
 
-  /** POST /auth/register */
-  register: async (body: RegisterInput): Promise<MessageResponse> => {
-    const { data } = await apiClient.post<MessageResponse>('/auth/register', body)
+  /** POST /auth/register — returns UserResponse (201) */
+  register: async (body: RegisterInput): Promise<UserResponse> => {
+    const { data } = await apiClient.post<UserResponse>('/auth/register', body)
     return data
   },
 
   /** POST /auth/refresh */
-  refresh: async (refreshToken: string): Promise<AuthResponse> => {
-    const { data } = await apiClient.post<AuthResponse>('/auth/refresh', { refreshToken })
+  refresh: async (refreshToken: string): Promise<TokenResponse> => {
+    const { data } = await apiClient.post<TokenResponse>('/auth/refresh', { refreshToken })
     return data
   },
 
-  /** POST /auth/logout */
-  logout: async (): Promise<void> => {
-    await apiClient.post('/auth/logout')
+  /** POST /auth/logout — optionally revoke refresh token too */
+  logout: async (refreshToken?: string | null): Promise<void> => {
+    await apiClient.post('/auth/logout', { refreshToken: refreshToken ?? null })
   },
 
   /** GET /auth/me */
   me: async (): Promise<UserResponse> => {
     const { data } = await apiClient.get<UserResponse>('/auth/me')
+    return data
+  },
+
+  /** GET /auth/verify-email?token=TOKEN */
+  verifyEmail: async (token: string): Promise<MessageResponse> => {
+    const { data } = await apiClient.get<MessageResponse>('/auth/verify-email', {
+      params: { token },
+    })
     return data
   },
 
@@ -82,8 +94,8 @@ export const authApi = {
     return data
   },
 
-  verify2FA: async (mfaToken: string, code: string): Promise<AuthResponse> => {
-    const { data } = await apiClient.post<AuthResponse>('/auth/2fa/verify', { mfaToken, code })
+  verify2FA: async (userId: string, code: string): Promise<TokenResponse> => {
+    const { data } = await apiClient.post<TokenResponse>('/auth/2fa/verify', { userId, code })
     return data
   },
 

@@ -1,9 +1,11 @@
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Link } from '@tanstack/react-router'
 import { Bot } from 'lucide-react'
 import { useRegister } from '@/features/auth/hooks'
 import { registerSchema, type RegisterInput } from '@/features/auth/schemas'
+import { getErrorMessage } from '@/shared/api/error-handler'
+import { PasswordStrength } from '@/shared/components/forms/PasswordStrength'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
@@ -21,9 +23,13 @@ export function RegisterPage() {
 
   const {
     register,
+    control,
     handleSubmit,
+    setError,
     formState: { errors },
   } = useForm<RegisterInput>({ resolver: zodResolver(registerSchema) })
+
+  const passwordValue = useWatch({ control, name: 'password', defaultValue: '' })
 
   return (
     <div className="w-full max-w-md space-y-6">
@@ -32,6 +38,7 @@ export function RegisterPage() {
           <Bot className="size-6" />
         </div>
         <h1 className="text-2xl font-bold">VoiceSaaS</h1>
+        <p className="text-sm text-muted-foreground">Create your account</p>
       </div>
 
       <Card>
@@ -43,17 +50,36 @@ export function RegisterPage() {
         <form
           onSubmit={(e) => {
             void handleSubmit((data) => {
-              register_.mutate(data)
+              register_.mutate(data, {
+                onError: (err) => {
+                  setError('root', { message: getErrorMessage(err) })
+                },
+              })
             })(e)
           }}
         >
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="fullName">Full name</Label>
-              <Input id="fullName" placeholder="Alice Smith" {...register('fullName')} />
-              {errors.fullName && (
-                <p className="text-xs text-destructive">{errors.fullName.message}</p>
-              )}
+            {errors.root && (
+              <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {errors.root.message}
+              </p>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label htmlFor="firstName">First name</Label>
+                <Input id="firstName" placeholder="Alice" {...register('firstName')} />
+                {errors.firstName && (
+                  <p className="text-xs text-destructive">{errors.firstName.message}</p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="lastName">Last name</Label>
+                <Input id="lastName" placeholder="Smith" {...register('lastName')} />
+                {errors.lastName && (
+                  <p className="text-xs text-destructive">{errors.lastName.message}</p>
+                )}
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -61,6 +87,7 @@ export function RegisterPage() {
               <Input
                 id="email"
                 type="email"
+                autoComplete="email"
                 placeholder="alice@example.com"
                 {...register('email')}
               />
@@ -68,29 +95,15 @@ export function RegisterPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="orgName">Organisation name</Label>
-              <Input id="orgName" placeholder="Acme Inc." {...register('orgName')} />
-              {errors.orgName && (
-                <p className="text-xs text-destructive">{errors.orgName.message}</p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="orgSlug">Subdomain / slug</Label>
-              <Input id="orgSlug" placeholder="acme" {...register('orgSlug')} />
-              {errors.orgSlug && (
-                <p className="text-xs text-destructive">{errors.orgSlug.message}</p>
-              )}
-            </div>
-
-            <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
               <Input
                 id="password"
                 type="password"
+                autoComplete="new-password"
                 placeholder="••••••••"
                 {...register('password')}
               />
+              <PasswordStrength password={passwordValue} />
               {errors.password && (
                 <p className="text-xs text-destructive">{errors.password.message}</p>
               )}

@@ -1,52 +1,67 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
-  LayoutDashboard, Bot, PhoneCall, CreditCard, Users, Shield,
-  Key, Webhook, FileText, Bell, Settings, ChevronLeft, ChevronRight,
-  Activity, Lock, BarChart3, Cpu, Sliders,
+  LayoutDashboard,
+  Bot,
+  PhoneCall,
+  CreditCard,
+  Users,
+  Shield,
+  Key,
+  Webhook,
+  FileText,
+  Bell,
+  Settings,
+  ChevronLeft,
+  ChevronRight,
+  Activity,
+  Lock,
+  BarChart3,
+  Cpu,
+  Sliders,
 } from 'lucide-react'
-import { cn }              from '@/shared/lib/utils'
-import { useRootStore }    from '@/app/store'
-import { useAuthStore, selectIsSuperuser } from '@/features/auth/store'
+import { cn } from '@/shared/lib/utils'
+import { useRootStore } from '@/app/store'
+import { useAuthStore, selectIsPlatformAdmin } from '@/features/auth/store'
 
 interface NavItem {
-  label:    string
-  href:     string
-  icon:     React.ElementType
+  label: string
+  href: string
+  icon: React.ElementType
   adminOnly?: boolean
 }
 
 const NAV_ITEMS: NavItem[] = [
   // ── Dashboard ─────────────────────────────────────────────────────────────
-  { label: 'Dashboard',   href: '/',                   icon: LayoutDashboard },
-  { label: 'Calls',       href: '/dashboard/calls',     icon: PhoneCall },
-  { label: 'Analytics',   href: '/dashboard/analytics', icon: BarChart3 },
+  { label: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { label: 'Calls', href: '/dashboard/calls', icon: PhoneCall },
+  { label: 'Analytics', href: '/dashboard/analytics', icon: BarChart3 },
   // ── Agents ────────────────────────────────────────────────────────────────
-  { label: 'Agents',      href: '/agents',              icon: Bot },
+  { label: 'Agents', href: '/agents', icon: Bot },
   // ── Organisation ──────────────────────────────────────────────────────────
-  { label: 'Members',     href: '/org/members',         icon: Users },
-  { label: 'Roles',       href: '/org/roles',           icon: Shield },
-  { label: 'Settings',    href: '/org/settings',        icon: Settings },
+  { label: 'Members', href: '/org/members', icon: Users },
+  { label: 'Roles', href: '/org/roles', icon: Shield },
+  { label: 'Settings', href: '/org/settings', icon: Settings },
   // ── Billing ───────────────────────────────────────────────────────────────
-  { label: 'Billing',     href: '/billing',             icon: CreditCard },
+  { label: 'Billing', href: '/billing', icon: CreditCard },
   // ── Developer ─────────────────────────────────────────────────────────────
-  { label: 'API Keys',    href: '/developer/api-keys',  icon: Key },
-  { label: 'Webhooks',    href: '/developer/webhooks',  icon: Webhook },
+  { label: 'API Keys', href: '/developer/api-keys', icon: Key },
+  { label: 'Webhooks', href: '/developer/webhooks', icon: Webhook },
   // ── Security / Audit ──────────────────────────────────────────────────────
-  { label: 'Security',    href: '/security',            icon: Lock },
-  { label: 'Audit Logs',  href: '/audit',               icon: FileText },
-  { label: 'Notifications', href: '/notifications',     icon: Bell },
+  { label: 'Security', href: '/security', icon: Lock },
+  { label: 'Audit Logs', href: '/audit', icon: FileText },
+  { label: 'Notifications', href: '/notifications', icon: Bell },
   // ── Admin (superuser only) ───────────────────────────────────────────────
-  { label: 'Admin',       href: '/admin',               icon: Cpu,     adminOnly: true },
-  { label: 'GPU Status',  href: '/admin/gpu-status',    icon: Activity, adminOnly: true },
-  { label: 'System',      href: '/admin/system-settings', icon: Sliders, adminOnly: true },
+  { label: 'Admin', href: '/admin', icon: Cpu, adminOnly: true },
+  { label: 'GPU Status', href: '/admin/gpu-status', icon: Activity, adminOnly: true },
+  { label: 'System', href: '/admin/system-settings', icon: Sliders, adminOnly: true },
 ]
 
 export function Sidebar() {
-  const collapsed    = useRootStore((s) => s.sidebarCollapsed)
-  const toggle       = useRootStore((s) => s.toggleSidebar)
-  const isSuperuser  = useAuthStore(selectIsSuperuser)
-  const routerState  = useRouterState()
-  const currentPath  = routerState.location.pathname
+  const collapsed = useRootStore((s) => s.sidebarCollapsed)
+  const toggle = useRootStore((s) => s.toggleSidebar)
+  const isSuperuser = useAuthStore(selectIsPlatformAdmin)
+  const routerState = useRouterState()
+  const currentPath = routerState.location.pathname
 
   const items = NAV_ITEMS.filter((i) => !i.adminOnly || isSuperuser)
 
@@ -59,17 +74,15 @@ export function Sidebar() {
     >
       {/* Logo */}
       <div className="flex h-14 items-center border-b px-3">
-        {!collapsed && (
-          <span className="ml-2 text-lg font-bold tracking-tight">VoiceSaaS</span>
-        )}
+        {!collapsed && <span className="ml-2 text-lg font-bold tracking-tight">VoiceSaaS</span>}
         {collapsed && <span className="text-lg font-bold">VS</span>}
       </div>
 
       {/* Nav items */}
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {items.map((item) => {
-          const active = currentPath === item.href ||
-            (item.href !== '/' && currentPath.startsWith(item.href))
+          const active =
+            currentPath === item.href || (item.href !== '/' && currentPath.startsWith(item.href))
           return (
             <Link
               key={item.href}
