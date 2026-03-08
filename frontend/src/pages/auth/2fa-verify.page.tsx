@@ -1,18 +1,28 @@
-import { useForm }      from 'react-hook-form'
-import { zodResolver }  from '@hookform/resolvers/zod'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
 import { use2FAVerify } from '@/features/auth/hooks'
 import { twoFACodeSchema, type TwoFACodeInput } from '@/features/auth/schemas'
-import { Button }       from '@/shared/components/ui/button'
-import { Input }        from '@/shared/components/ui/input'
-import { Label }        from '@/shared/components/ui/label'
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/shared/components/ui/card'
-import { ShieldCheck }  from 'lucide-react'
+import { Button } from '@/shared/components/ui/button'
+import { Input } from '@/shared/components/ui/input'
+import { Label } from '@/shared/components/ui/label'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/shared/components/ui/card'
+import { ShieldCheck } from 'lucide-react'
 
 export function TwoFAVerifyPage() {
   const verify = use2FAVerify()
 
-  const { register, handleSubmit, formState: { errors } } =
-    useForm<TwoFACodeInput>({ resolver: zodResolver(twoFACodeSchema) })
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<TwoFACodeInput>({ resolver: zodResolver(twoFACodeSchema) })
 
   const onSubmit = (data: TwoFACodeInput) => {
     const mfaToken = sessionStorage.getItem('mfa_token') ?? ''
@@ -29,7 +39,11 @@ export function TwoFAVerifyPage() {
           <CardTitle>Two-factor authentication</CardTitle>
           <CardDescription>Enter the 6-digit code from your authenticator app.</CardDescription>
         </CardHeader>
-        <form onSubmit={handleSubmit(onSubmit)}>
+        <form
+          onSubmit={(e) => {
+            void handleSubmit(onSubmit)(e)
+          }}
+        >
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="code">Verification code</Label>
@@ -44,7 +58,9 @@ export function TwoFAVerifyPage() {
             </div>
           </CardContent>
           <CardFooter>
-            <Button className="w-full" type="submit" loading={verify.isPending}>Verify</Button>
+            <Button className="w-full" type="submit" loading={verify.isPending}>
+              Verify
+            </Button>
           </CardFooter>
         </form>
       </Card>

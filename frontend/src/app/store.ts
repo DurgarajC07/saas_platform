@@ -18,8 +18,12 @@ interface RootState {
 
 export const useRootStore = create<RootState>((set) => ({
   sidebarCollapsed: false,
-  toggleSidebar:    () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  toggleSidebar: () => {
+    set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed }))
+  },
 
   isGlobalLoading: false,
-  setGlobalLoading: (v) => set({ isGlobalLoading: v }),
+  setGlobalLoading: (v) => {
+    set({ isGlobalLoading: v })
+  },
 }))

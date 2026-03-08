@@ -1,11 +1,11 @@
 import { Bell, User, LogOut, Settings, ChevronDown } from 'lucide-react'
 import { Link } from '@tanstack/react-router'
 import { useAuthStore } from '@/features/auth/store'
-import { useLogout    } from '@/features/auth/hooks'
-import { cn           } from '@/shared/lib/utils'
+import { useLogout } from '@/features/auth/hooks'
+import { cn } from '@/shared/lib/utils'
 
 export function TopBar() {
-  const user   = useAuthStore((s) => s.user)
+  const user = useAuthStore((s) => s.user)
   const logout = useLogout()
 
   return (
@@ -29,7 +29,7 @@ export function TopBar() {
         <div className="group relative">
           <button className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-accent transition-colors">
             <div className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
-              {user?.fullName?.[0]?.toUpperCase() ?? 'U'}
+              {(user?.fullName[0] ?? 'U').toUpperCase()}
             </div>
             <span className="hidden sm:block max-w-32 truncate">{user?.fullName ?? 'User'}</span>
             <ChevronDown className="size-3 text-muted-foreground" />
@@ -51,7 +51,9 @@ export function TopBar() {
             </Link>
             <hr className="my-1" />
             <button
-              onClick={() => logout.mutate()}
+              onClick={() => {
+                logout.mutate()
+              }}
               className="flex w-full items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
             >
               <LogOut className="size-4" /> Sign out

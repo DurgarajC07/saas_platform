@@ -1,13 +1,20 @@
-import { useForm }       from 'react-hook-form'
-import { zodResolver }   from '@hookform/resolvers/zod'
-import { Link }          from '@tanstack/react-router'
-import { Bot }           from 'lucide-react'
-import { useLogin }      from '@/features/auth/hooks'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { Link } from '@tanstack/react-router'
+import { Bot } from 'lucide-react'
+import { useLogin } from '@/features/auth/hooks'
 import { loginSchema, type LoginInput } from '@/features/auth/schemas'
-import { Button }        from '@/shared/components/ui/button'
-import { Input }         from '@/shared/components/ui/input'
-import { Label }         from '@/shared/components/ui/label'
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/shared/components/ui/card'
+import { Button } from '@/shared/components/ui/button'
+import { Input } from '@/shared/components/ui/input'
+import { Label } from '@/shared/components/ui/label'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/shared/components/ui/card'
 
 export function LoginPage() {
   const login = useLogin()
@@ -35,7 +42,13 @@ export function LoginPage() {
           <CardDescription>Enter your credentials to access the platform</CardDescription>
         </CardHeader>
 
-        <form onSubmit={handleSubmit((data) => login.mutate(data))}>
+        <form
+          onSubmit={(e) => {
+            void handleSubmit((data) => {
+              login.mutate(data)
+            })(e)
+          }}
+        >
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
@@ -46,9 +59,7 @@ export function LoginPage() {
                 placeholder="alice@example.com"
                 {...register('email')}
               />
-              {errors.email && (
-                <p className="text-xs text-destructive">{errors.email.message}</p>
-              )}
+              {errors.email && <p className="text-xs text-destructive">{errors.email.message}</p>}
             </div>
 
             <div className="space-y-2">

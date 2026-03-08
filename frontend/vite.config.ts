@@ -1,53 +1,37 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { resolve } from 'path'
+import path from 'path'
 
 export default defineConfig({
-  plugins: [
-    tailwindcss(),
-    react(),
-  ],
+  plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      '@': resolve(__dirname, 'src'),
-    },
-  },
-  server: {
-    port: 5173,
-    host: true, // expose to network (needed inside Docker)
-    proxy: {
-      // Proxy /api calls to the FastAPI backend during dev
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-    },
-  },
-  preview: {
-    port: 5173,
-    host: true,
+    alias: { '@': path.resolve(__dirname, 'src') },
   },
   build: {
     outDir: 'dist',
     sourcemap: true,
     rollupOptions: {
       output: {
-        // Manual chunk splitting for better caching
         manualChunks: {
-          'react-core':    ['react', 'react-dom'],
-          'tanstack':      ['@tanstack/react-query', '@tanstack/react-router', '@tanstack/react-table'],
-          'ui-radix':      [
-            '@radix-ui/react-dialog',
-            '@radix-ui/react-dropdown-menu',
-            '@radix-ui/react-tooltip',
-            '@radix-ui/react-avatar',
-          ],
-          'charts':        ['recharts'],
-          'forms':         ['react-hook-form', '@hookform/resolvers', 'zod'],
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-query': ['@tanstack/react-query'],
+          'vendor-router': ['@tanstack/react-router'],
+          'vendor-charts': ['recharts'],
+          'vendor-table': ['@tanstack/react-table'],
+          'vendor-forms': ['react-hook-form', 'zod'],
         },
       },
     },
+  },
+  server: {
+    port: 3000,
+    host: true,
+    proxy: { '/api': 'http://localhost:8000' },
+  },
+  preview: {
+    port: 3000,
+    host: true,
   },
   test: {
     environment: 'jsdom',

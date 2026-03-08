@@ -6,7 +6,7 @@ import { normalizeError } from './error-handler'
 // Singleton Axios instance — the ONLY place HTTP config lives
 // ─────────────────────────────────────────────────────────────────────────────
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ?? '/api/v1',
+  baseURL: (import.meta.env.VITE_API_URL as string | undefined) ?? '/api/v1',
   timeout: 30_000,
   headers: {
     'Content-Type': 'application/json',
@@ -16,8 +16,8 @@ export const apiClient = axios.create({
 // ── Request interceptor: inject Authorization + X-Org-ID ────────────────────
 apiClient.interceptors.request.use((config) => {
   const { token, orgId } = useAuthStore.getState()
-  if (token)  config.headers.Authorization     = `Bearer ${token}`
-  if (orgId)  config.headers['X-Org-ID']       = orgId
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  if (orgId) config.headers['X-Org-ID'] = orgId
   return config
 })
 
@@ -35,28 +35,33 @@ apiClient.interceptors.response.use(
       try {
         // Deduplicate concurrent refresh calls
         if (!_refreshPromise) {
-          _refreshPromise = doRefresh().finally(() => { _refreshPromise = null })
+          _refreshPromise = doRefresh().finally(() => {
+            _refreshPromise = null
+          })
         }
         const newToken = await _refreshPromise
         original.headers.Authorization = `Bearer ${newToken}`
-        return apiClient(original)
+        return await apiClient(original)
       } catch {
         // Refresh failed → force logout
         useAuthStore.getState().logout()
         window.location.href = '/auth/login'
+        const apiErr = normalizeError(error)
+        return Promise.reject(Object.assign(new Error(apiErr.message), apiErr))
       }
     }
 
-    return Promise.reject(normalizeError(error))
+    const apiErr = normalizeError(error)
+    return Promise.reject(Object.assign(new Error(apiErr.message), apiErr))
   },
 )
 
 async function doRefresh(): Promise<string> {
   const refreshToken = useAuthStore.getState().refreshToken
-  if (!refreshToken) throw new Error('No refresh token')
+  if (!refreshToken) return Promise.reject(new Error('No refresh token'))
 
-  const { data } = await axios.post(
-    `${import.meta.env.VITE_API_URL ?? '/api/v1'}/auth/refresh`,
+  const { data } = await axios.post<{ accessToken: string; refreshToken: string }>(
+    `${(import.meta.env.VITE_API_URL as string | undefined) ?? '/api/v1'}/auth/refresh`,
     { refreshToken },
   )
   useAuthStore.getState().setTokens(data.accessToken, data.refreshToken)

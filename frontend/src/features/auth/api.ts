@@ -10,6 +10,15 @@ import {
   type SessionResponse,
 } from './schemas'
 
+interface MessageResponse {
+  message: string
+}
+interface Setup2FAResponse {
+  secret: string
+  qrCodeUri: string
+  backupCodes: string[]
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Auth API calls
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22,8 +31,8 @@ export const authApi = {
   },
 
   /** POST /auth/register */
-  register: async (body: RegisterInput) => {
-    const { data } = await apiClient.post('/auth/register', body)
+  register: async (body: RegisterInput): Promise<MessageResponse> => {
+    const { data } = await apiClient.post<MessageResponse>('/auth/register', body)
     return data
   },
 
@@ -34,7 +43,7 @@ export const authApi = {
   },
 
   /** POST /auth/logout */
-  logout: async () => {
+  logout: async (): Promise<void> => {
     await apiClient.post('/auth/logout')
   },
 
@@ -45,31 +54,31 @@ export const authApi = {
   },
 
   /** POST /auth/forgot-password */
-  forgotPassword: async (body: ForgotPasswordInput) => {
-    const { data } = await apiClient.post('/auth/forgot-password', body)
+  forgotPassword: async (body: ForgotPasswordInput): Promise<MessageResponse> => {
+    const { data } = await apiClient.post<MessageResponse>('/auth/forgot-password', body)
     return data
   },
 
   /** POST /auth/reset-password */
-  resetPassword: async (body: ResetPasswordInput) => {
-    const { data } = await apiClient.post('/auth/reset-password', body)
+  resetPassword: async (body: ResetPasswordInput): Promise<MessageResponse> => {
+    const { data } = await apiClient.post<MessageResponse>('/auth/reset-password', body)
     return data
   },
 
   /** POST /auth/password/change */
-  changePassword: async (body: ChangePasswordInput) => {
-    const { data } = await apiClient.post('/auth/password/change', body)
+  changePassword: async (body: ChangePasswordInput): Promise<MessageResponse> => {
+    const { data } = await apiClient.post<MessageResponse>('/auth/password/change', body)
     return data
   },
 
   // ── 2FA ──────────────────────────────────────────────────────────────────
-  setup2FA: async () => {
-    const { data } = await apiClient.post('/auth/2fa/setup')
-    return data as { secret: string; qrCodeUri: string; backupCodes: string[] }
+  setup2FA: async (): Promise<Setup2FAResponse> => {
+    const { data } = await apiClient.post<Setup2FAResponse>('/auth/2fa/setup')
+    return data
   },
 
-  confirm2FA: async (code: string) => {
-    const { data } = await apiClient.post('/auth/2fa/confirm', { code })
+  confirm2FA: async (code: string): Promise<MessageResponse> => {
+    const { data } = await apiClient.post<MessageResponse>('/auth/2fa/confirm', { code })
     return data
   },
 
@@ -78,22 +87,22 @@ export const authApi = {
     return data
   },
 
-  disable2FA: async () => {
-    const { data } = await apiClient.delete('/auth/2fa/disable')
+  disable2FA: async (): Promise<MessageResponse> => {
+    const { data } = await apiClient.delete<MessageResponse>('/auth/2fa/disable')
     return data
   },
 
   // ── Sessions ─────────────────────────────────────────────────────────────
   getSessions: async (): Promise<{ sessions: SessionResponse[] }> => {
-    const { data } = await apiClient.get('/auth/sessions')
+    const { data } = await apiClient.get<{ sessions: SessionResponse[] }>('/auth/sessions')
     return data
   },
 
-  revokeSession: async (sessionId: string) => {
+  revokeSession: async (sessionId: string): Promise<void> => {
     await apiClient.delete(`/auth/sessions/${sessionId}`)
   },
 
-  revokeAllSessions: async () => {
+  revokeAllSessions: async (): Promise<void> => {
     await apiClient.delete('/auth/sessions')
   },
 }

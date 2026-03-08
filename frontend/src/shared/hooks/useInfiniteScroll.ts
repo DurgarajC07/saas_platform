@@ -24,12 +24,16 @@ export function useInfiniteScroll({
     if (!enabled || !sentinelRef.current) return
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting) cb()
+        if (entries[0]?.isIntersecting) {
+          cb()
+        }
       },
       { threshold },
     )
     observer.observe(sentinelRef.current)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+    }
   }, [enabled, threshold, cb])
 
   return sentinelRef

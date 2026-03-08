@@ -27,7 +27,10 @@ export function sleep(ms: number) {
 }
 
 /** Safely parse JSON; returns null on failure */
-export function safeJson<T>(json: string): T | null {
-  try { return JSON.parse(json) as T }
-  catch { return null }
+export function safeJson(json: string): unknown {
+  try {
+    return JSON.parse(json) as unknown
+  } catch {
+    return null
+  }
 }
