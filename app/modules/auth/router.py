@@ -72,6 +72,7 @@ from app.modules.auth.schemas import (
     Setup2FAResponse,
     TokenResponse,
     TwoFactorChallengeResponse,
+    UpdateProfileRequest,
     UserResponse,
     Verify2FARequest,
 )
@@ -274,6 +275,21 @@ async def me(
 ) -> User:
     """Return the profile of the currently authenticated user."""
     return current_user
+
+
+@router.patch(
+    "/me",
+    response_model=UserResponse,
+    summary="Update current user profile",
+)
+async def update_me(
+    data: UpdateProfileRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    deps: Annotated[AuthDeps, Depends()],
+) -> User:
+    """Update mutable profile fields (name, timezone, locale, avatar, phone)."""
+    svc = AuthService(deps.db, deps.redis)
+    return await svc.update_profile(current_user, data)
 
 
 # ── OAuth2 ─────────────────────────────────────────────────────────────────

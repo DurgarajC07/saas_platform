@@ -58,6 +58,7 @@ from app.modules.auth.schemas import (
     RegisterRequest,
     ResetPasswordRequest,
     TokenResponse,
+    UpdateProfileRequest,
 )
 from app.shared.enums import TokenType
 
@@ -501,3 +502,23 @@ class AuthService:
         await self.session_repo.revoke_all_except(user_id, current_session_id)
         await self.session.commit()
         logger.info("all_other_sessions_revoked", user_id=str(user_id))
+
+    async def update_profile(self, user: User, data: UpdateProfileRequest) -> User:
+        """
+        Patch mutable profile fields on the user record.
+        Only fields explicitly provided (not None) are updated.
+        Commits the transaction.
+        """
+        patch: dict[str, object] = {
+            k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None
+        }
+        if not patch:
+            return user  # nothing to do
+
+        for field, value in patch.items():
+            setattr(user, field, value)
+
+        await self.session.commit()
+        await self.session.refresh(user)
+        logger.info("profile_updated", user_id=str(user.id), fields=list(patch.keys()))
+        return user

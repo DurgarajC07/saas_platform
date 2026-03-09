@@ -51,6 +51,16 @@ export const twoFACodeSchema = z.object({
   code: z.string().length(6, 'Code must be 6 digits').regex(/^\d+$/, 'Digits only'),
 })
 
+export const updateProfileSchema = z.object({
+  firstName: z.string().min(1, 'Required').max(150).optional().or(z.literal('')),
+  lastName: z.string().min(1, 'Required').max(150).optional().or(z.literal('')),
+  displayName: z.string().max(255).optional().or(z.literal('')),
+  phone: z.string().max(50).optional().or(z.literal('')),
+  avatarUrl: z.string().url('Invalid URL').max(1024).optional().or(z.literal('')),
+  timezone: z.string().max(100).optional(),
+  locale: z.string().max(20).optional(),
+})
+
 // ─── Response types (aligned with backend camelCase serialisation) ────────────
 
 /** Returned by POST /auth/login (success), POST /auth/refresh, POST /auth/2fa/verify */
@@ -113,3 +123,4 @@ export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>
 export type TwoFACodeInput = z.infer<typeof twoFACodeSchema>
+export type UpdateProfileInput = z.infer<typeof updateProfileSchema>

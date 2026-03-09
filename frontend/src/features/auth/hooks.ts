@@ -12,6 +12,7 @@ import type {
   ForgotPasswordInput,
   ResetPasswordInput,
   ChangePasswordInput,
+  UpdateProfileInput,
   OAuthProvider,
 } from './schemas'
 
@@ -211,6 +212,33 @@ export function useRevokeSession() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['auth', 'sessions'] })
       toast.success('Session revoked.')
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  })
+}
+
+// ─── useUpdateProfile ────────────────────────────────────────────────────────
+export function useUpdateProfile() {
+  const setUser = useAuthStore((s) => s.setUser)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: UpdateProfileInput) => authApi.updateProfile(body),
+    onSuccess: (user) => {
+      setUser(user)
+      void qc.invalidateQueries({ queryKey: queryKeys.auth.me() })
+      toast.success('Profile saved.')
+    },
+  })
+}
+
+// ─── useDisable2FA ───────────────────────────────────────────────────────────
+export function useDisable2FA() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => authApi.disable2FA(),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.auth.me() })
+      toast.success('Two-factor authentication disabled.')
     },
     onError: (err) => toast.error(getErrorMessage(err)),
   })

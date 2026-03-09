@@ -5,6 +5,7 @@ import {
   type ForgotPasswordInput,
   type ResetPasswordInput,
   type ChangePasswordInput,
+  type UpdateProfileInput,
   type TokenResponse,
   type TwoFactorChallengeResponse,
   type UserResponse,
@@ -18,7 +19,7 @@ interface MessageResponse {
 }
 interface Setup2FAResponse {
   secret: string
-  qrCodeUri: string
+  qrUri: string
   backupCodes: string[]
 }
 
@@ -82,6 +83,12 @@ export const authApi = {
   /** POST /auth/password/change */
   changePassword: async (body: ChangePasswordInput): Promise<MessageResponse> => {
     const { data } = await apiClient.post<MessageResponse>('/auth/password/change', body)
+    return data
+  },
+
+  /** PATCH /auth/me — update profile fields */
+  updateProfile: async (body: UpdateProfileInput): Promise<UserResponse> => {
+    const { data } = await apiClient.patch<UserResponse>('/auth/me', body)
     return data
   },
 

@@ -267,7 +267,7 @@ const rolesListRoute = createRoute({
   path: '/org/roles',
   component: RolesListPage,
 })
-const roleEditorRoute = createRoute({
+export const roleEditorRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: '/org/roles/$roleId',
   component: RoleEditorPage,
