@@ -17,6 +17,7 @@ import { ForgotPasswordPage } from '@/pages/auth/forgot-password.page'
 import { ResetPasswordPage } from '@/pages/auth/reset-password.page'
 import { VerifyEmailPage } from '@/pages/auth/verify-email.page'
 import { TwoFAVerifyPage } from '@/pages/auth/2fa-verify.page'
+import { OAuthCallbackPage } from '@/pages/auth/oauth-callback.page'
 
 // ─── App pages ───────────────────────────────────────────────────────────────
 import { DashboardPage } from '@/pages/dashboard/index.page'
@@ -134,6 +135,11 @@ const twoFAVerifyRoute = createRoute({
   getParentRoute: () => authLayoutRoute,
   path: '/auth/2fa-verify',
   component: TwoFAVerifyPage,
+})
+const oauthCallbackRoute = createRoute({
+  getParentRoute: () => authLayoutRoute,
+  path: '/oauth/callback',
+  component: OAuthCallbackPage,
 })
 
 // ── App layout (protected) ────────────────────────────────────────────────────
@@ -407,6 +413,7 @@ const routeTree = rootRoute.addChildren([
     resetPasswordRoute,
     verifyEmailRoute,
     twoFAVerifyRoute,
+    oauthCallbackRoute,
   ]),
   appLayoutRoute.addChildren([
     dashboardRoute,

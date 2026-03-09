@@ -5,9 +5,11 @@ import { Bot } from 'lucide-react'
 import { useLogin } from '@/features/auth/hooks'
 import { loginSchema, type LoginInput } from '@/features/auth/schemas'
 import { getErrorMessage } from '@/shared/api/error-handler'
+import { OAuthButtons } from '@/shared/components/auth/OAuthButtons'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
+import { Separator } from '@/shared/components/ui/separator'
 import {
   Card,
   CardContent,
@@ -109,6 +111,19 @@ export function LoginPage() {
             </p>
           </CardFooter>
         </form>
+
+        {/* ── Social login ── */}
+        <div className="px-6 pb-6 space-y-4">
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <Separator />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-card px-2 text-muted-foreground">Or continue with</span>
+            </div>
+          </div>
+          <OAuthButtons />
+        </div>
       </Card>
     </div>
   )

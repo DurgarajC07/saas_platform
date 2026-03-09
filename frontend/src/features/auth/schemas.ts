@@ -97,6 +97,15 @@ export interface SessionResponse {
   isCurrent: boolean
 }
 
+// ─── OAuth ────────────────────────────────────────────────────────────────────
+export type OAuthProvider = 'google' | 'github'
+
+/** Returned by GET /auth/oauth/{provider} */
+export interface OAuthRedirectResponse {
+  authorizationUrl: string
+  state: string
+}
+
 // Types inferred from Zod schemas
 export type LoginInput = z.infer<typeof loginSchema>
 export type RegisterInput = z.infer<typeof registerSchema>

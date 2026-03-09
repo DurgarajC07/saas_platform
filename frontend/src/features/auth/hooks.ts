@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { toast } from 'sonner'
@@ -11,6 +12,7 @@ import type {
   ForgotPasswordInput,
   ResetPasswordInput,
   ChangePasswordInput,
+  OAuthProvider,
 } from './schemas'
 
 // ─── useCurrentUser ───────────────────────────────────────────────────────────
@@ -157,6 +159,29 @@ export function use2FAVerify() {
     },
     onError: (err) => toast.error(getErrorMessage(err)),
   })
+}
+
+// ─── useOAuthLogin ───────────────────────────────────────────────────────────
+/**
+ * Returns `startOAuth(provider)` which fetches the authorization URL from the
+ * backend and redirects the browser to the provider consent screen.
+ * After consent the backend redirects to /oauth/callback with the tokens.
+ */
+export function useOAuthLogin() {
+  const [loading, setLoading] = useState<OAuthProvider | null>(null)
+
+  const startOAuth = async (provider: OAuthProvider) => {
+    setLoading(provider)
+    try {
+      const data = await authApi.getOAuthUrl(provider)
+      window.location.href = data.authorizationUrl
+    } catch (err) {
+      setLoading(null)
+      toast.error(getErrorMessage(err))
+    }
+  }
+
+  return { startOAuth, loading }
 }
 
 // ─── useSessions ─────────────────────────────────────────────────────────────

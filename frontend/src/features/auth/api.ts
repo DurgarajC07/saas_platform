@@ -9,6 +9,8 @@ import {
   type TwoFactorChallengeResponse,
   type UserResponse,
   type SessionResponse,
+  type OAuthProvider,
+  type OAuthRedirectResponse,
 } from './schemas'
 
 interface MessageResponse {
@@ -116,5 +118,12 @@ export const authApi = {
 
   revokeAllSessions: async (): Promise<void> => {
     await apiClient.delete('/auth/sessions')
+  },
+
+  // ── OAuth ────────────────────────────────────────────────────────────────
+  /** GET /auth/oauth/{provider} — fetch the provider authorization URL */
+  getOAuthUrl: async (provider: OAuthProvider): Promise<OAuthRedirectResponse> => {
+    const { data } = await apiClient.get<OAuthRedirectResponse>(`/auth/oauth/${provider}`)
+    return data
   },
 }
