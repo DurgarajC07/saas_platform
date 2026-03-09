@@ -161,6 +161,17 @@ export function use2FAVerify() {
   })
 }
 
+// ─── useOAuthProviders ────────────────────────────────────────────────────────────
+/** Returns the list of OAuth providers currently configured on the backend. */
+export function useOAuthProviders() {
+  return useQuery({
+    queryKey: ['auth', 'oauth-providers'] as const,
+    queryFn: authApi.getEnabledOAuthProviders,
+    staleTime: 10 * 60 * 1000, // stable — recheck every 10 min
+    retry: false,
+  })
+}
+
 // ─── useOAuthLogin ───────────────────────────────────────────────────────────
 /**
  * Returns `startOAuth(provider)` which fetches the authorization URL from the

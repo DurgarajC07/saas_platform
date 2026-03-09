@@ -115,6 +115,12 @@ class OAuthRedirectResponse(CamelModel):
     state: str
 
 
+class OAuthProvidersResponse(CamelModel):
+    """Returned from GET /oauth/providers — lists configured providers."""
+
+    providers: list[str]  # e.g. ["google", "github"]
+
+
 # ── Two-Factor Authentication (TOTP) ──────────────────────────────────────
 
 class Setup2FAResponse(CamelModel):

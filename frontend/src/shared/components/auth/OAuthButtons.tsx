@@ -1,12 +1,14 @@
 /**
- * OAuthButtons — renders Google + GitHub social login buttons.
+ * OAuthButtons — renders social login buttons for configured OAuth providers.
  *
- * Clicking a button calls GET /auth/oauth/{provider} to retrieve the
- * provider's authorization URL, then redirects the browser there.
- * After consent, the backend redirects back to /oauth/callback with JWT tokens.
+ * Fetches GET /auth/oauth/providers to learn which providers (Google, GitHub…)
+ * are actually configured on the backend, then renders only those buttons.
+ * If no providers are configured the component renders nothing.
  */
-import { useOAuthLogin } from '@/features/auth/hooks'
+import { useOAuthProviders, useOAuthLogin } from '@/features/auth/hooks'
 import { Button } from '@/shared/components/ui/button'
+import { Skeleton } from '@/shared/components/ui/skeleton'
+import type { OAuthProvider } from '@/features/auth/schemas'
 
 // ── Inline SVG brand icons ────────────────────────────────────────────────────
 
@@ -52,38 +54,52 @@ function GithubIcon() {
   )
 }
 
+const PROVIDER_META: Record<OAuthProvider, { label: string; icon: React.ReactNode }> = {
+  google: { label: 'Google', icon: <GoogleIcon /> },
+  github: { label: 'GitHub', icon: <GithubIcon /> },
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function OAuthButtons() {
+  const { data: enabledProviders, isLoading } = useOAuthProviders()
   const { startOAuth, loading } = useOAuthLogin()
 
-  return (
-    <div className="grid grid-cols-2 gap-3">
-      <Button
-        variant="outline"
-        type="button"
-        disabled={loading !== null}
-        loading={loading === 'google'}
-        onClick={() => {
-          void startOAuth('google')
-        }}
-      >
-        <GoogleIcon />
-        Google
-      </Button>
+  // Skeleton while checking backend config
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 gap-3">
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+      </div>
+    )
+  }
 
-      <Button
-        variant="outline"
-        type="button"
-        disabled={loading !== null}
-        loading={loading === 'github'}
-        onClick={() => {
-          void startOAuth('github')
-        }}
-      >
-        <GithubIcon />
-        GitHub
-      </Button>
+  // Only render providers we know about AND that are configured on the backend
+  const available = (enabledProviders ?? []).filter((p): p is OAuthProvider => p in PROVIDER_META)
+
+  if (available.length === 0) return null
+
+  return (
+    <div className={`grid gap-3 ${available.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+      {available.map((provider) => {
+        const { label, icon } = PROVIDER_META[provider]
+        return (
+          <Button
+            key={provider}
+            variant="outline"
+            type="button"
+            disabled={loading !== null}
+            loading={loading === provider}
+            onClick={() => {
+              void startOAuth(provider)
+            }}
+          >
+            {icon}
+            {label}
+          </Button>
+        )
+      })}
     </div>
   )
 }

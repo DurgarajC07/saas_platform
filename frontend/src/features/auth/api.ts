@@ -121,6 +121,12 @@ export const authApi = {
   },
 
   // ── OAuth ────────────────────────────────────────────────────────────────
+  /** GET /auth/oauth/providers — list which providers are enabled on the backend */
+  getEnabledOAuthProviders: async (): Promise<OAuthProvider[]> => {
+    const { data } = await apiClient.get<{ providers: OAuthProvider[] }>('/auth/oauth/providers')
+    return data.providers
+  },
+
   /** GET /auth/oauth/{provider} — fetch the provider authorization URL */
   getOAuthUrl: async (provider: OAuthProvider): Promise<OAuthRedirectResponse> => {
     const { data } = await apiClient.get<OAuthRedirectResponse>(`/auth/oauth/${provider}`)

@@ -41,38 +41,47 @@ logger = structlog.get_logger(__name__)
 # ── Provider configurations ───────────────────────────────────────────────
 
 def _get_providers() -> dict[str, dict[str, str]]:
-    """Build provider config from settings (lazy, so settings are loaded once)."""
+    """Build provider config from settings.  Only includes providers whose
+    client_id and client_secret are actually configured (non-empty)."""
     settings = get_settings()
-    return {
+
+    candidates: dict[str, dict[str, str]] = {
         "google": {
-            "client_id": settings.GOOGLE_CLIENT_ID,
-            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "client_id": getattr(settings, "GOOGLE_CLIENT_ID", "") or "",
+            "client_secret": getattr(settings, "GOOGLE_CLIENT_SECRET", "") or "",
             "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
             "token_url": "https://oauth2.googleapis.com/token",
             "userinfo_url": "https://openidconnect.googleapis.com/v1/userinfo",
             "scope": "openid email profile",
         },
         "github": {
-            "client_id": settings.GITHUB_CLIENT_ID,
-            "client_secret": settings.GITHUB_CLIENT_SECRET,
+            "client_id": getattr(settings, "GITHUB_CLIENT_ID", "") or "",
+            "client_secret": getattr(settings, "GITHUB_CLIENT_SECRET", "") or "",
             "authorize_url": "https://github.com/login/oauth/authorize",
             "token_url": "https://github.com/login/oauth/access_token",
             "userinfo_url": "https://api.github.com/user",
             "emails_url": "https://api.github.com/user/emails",
             "scope": "read:user user:email",
         },
-        "microsoft": {
-            "client_id": settings.MICROSOFT_CLIENT_ID,
-            "client_secret": settings.MICROSOFT_CLIENT_SECRET,
-            "authorize_url": (
-                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-            ),
-            "token_url": (
-                "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-            ),
-            "userinfo_url": "https://graph.microsoft.com/v1.0/me",
-            "scope": "openid email profile",
-        },
+        # "microsoft": {
+        #     "client_id": getattr(settings, "MICROSOFT_CLIENT_ID", "") or "",
+        #     "client_secret": getattr(settings, "MICROSOFT_CLIENT_SECRET", "") or "",
+        #     "authorize_url": (
+        #         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        #     ),
+        #     "token_url": (
+        #         "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        #     ),
+        #     "userinfo_url": "https://graph.microsoft.com/v1.0/me",
+        #     "scope": "openid email profile",
+        # },
+    }
+
+    # Only return providers that have credentials configured
+    return {
+        name: cfg
+        for name, cfg in candidates.items()
+        if cfg["client_id"] and cfg["client_secret"]
     }
 
 

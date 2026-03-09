@@ -63,6 +63,7 @@ from app.modules.auth.schemas import (
     LogoutRequest,
     MessageResponse,
     OAuthRedirectResponse,
+    OAuthProvidersResponse,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -277,8 +278,21 @@ async def me(
 
 # ── OAuth2 ─────────────────────────────────────────────────────────────────
 
-@router.get(
-    "/oauth/{provider}",
+@router.get(    "/oauth/providers",
+    response_model=OAuthProvidersResponse,
+    summary="List configured OAuth2 providers",
+)
+async def oauth_providers() -> OAuthProvidersResponse:
+    """
+    Return the list of OAuth2 providers that have credentials configured.
+    The frontend uses this to conditionally show/hide social login buttons.
+    """
+    from app.modules.auth.oauth_service import _get_providers
+
+    return OAuthProvidersResponse(providers=list(_get_providers().keys()))
+
+
+@router.get(    "/oauth/{provider}",
     response_model=OAuthRedirectResponse,
     summary="Initiate OAuth2 social login",
 )
