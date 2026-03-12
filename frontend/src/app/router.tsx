@@ -168,15 +168,24 @@ const analyticsRoute = createRoute({
 })
 
 // Agents
-const agentListRoute = createRoute({
+export const agentListRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: '/agents',
   component: AgentListPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    status: (search['status'] as string | undefined) ?? '',
+    type: (search['type'] as string | undefined) ?? '',
+    search: (search['search'] as string | undefined) ?? '',
+    page: Number(search['page'] ?? 1),
+  }),
 })
-const agentNewRoute = createRoute({
+export const agentNewRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: '/agents/new',
   component: AgentNewPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    step: Number(search['step'] ?? 1),
+  }),
 })
 const agentDetailRoute = createRoute({
   getParentRoute: () => appLayoutRoute,

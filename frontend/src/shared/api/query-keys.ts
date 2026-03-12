@@ -13,6 +13,8 @@ export interface AgentFilters {
   page?: number
   pageSize?: number
   search?: string
+  status?: string
+  type?: string
 }
 export interface CallFilters {
   page?: number
