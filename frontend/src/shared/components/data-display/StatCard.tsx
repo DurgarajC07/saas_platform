@@ -1,42 +1,37 @@
 import { type LucideIcon } from 'lucide-react'
-import { Card, CardContent } from '@/shared/components/ui/card'
-import { Badge }             from '@/shared/components/ui/badge'
-import { cn }                from '@/shared/lib/utils'
+import { cn } from '@/shared/lib/utils'
+import { Card, CardContent, CardHeader, CardTitle } from '@/shared/components/ui/card'
+import { Skeleton } from '@/shared/components/ui/skeleton'
 
-interface StatCardProps {
+export interface StatCardProps {
   title: string
   value: string | number
-  description?: string
-  icon?: LucideIcon
-  trend?: { value: number; label?: string }
-  className?: string
+  delta?: { value: number; direction: 'up' | 'down'; label: string }
+  icon: LucideIcon
+  loading?: boolean
 }
 
-export function StatCard({ title, value, description, icon: Icon, trend, className }: StatCardProps) {
-  const up = (trend?.value ?? 0) >= 0
+export function StatCard({ title, value, delta, icon: Icon, loading }: StatCardProps) {
+  if (loading) return <Skeleton className="h-32 w-full rounded-xl" />
 
   return (
-    <Card className={cn(className)}>
-      <CardContent className="pt-6">
-        <div className="flex items-start justify-between">
-          <p className="text-sm font-medium text-muted-foreground">{title}</p>
-          {Icon && (
-            <div className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-              <Icon className="size-4" />
-            </div>
-          )}
-        </div>
-        <p className="mt-2 text-3xl font-bold tracking-tight">{value}</p>
-        <div className="mt-2 flex items-center gap-2">
-          {trend !== undefined && (
-            <Badge variant={up ? 'success' : 'destructive'} className="text-xs">
-              {up ? '▲' : '▼'} {Math.abs(trend.value)}%
-            </Badge>
-          )}
-          {description && (
-            <span className="text-xs text-muted-foreground">{description}</span>
-          )}
-        </div>
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-bold">{value}</div>
+        {delta && (
+          <p
+            className={cn(
+              'mt-1 text-xs',
+              delta.direction === 'up' ? 'text-emerald-600' : 'text-rose-600',
+            )}
+          >
+            {delta.direction === 'up' ? '↑' : '↓'} {delta.value}% {delta.label}
+          </p>
+        )}
       </CardContent>
     </Card>
   )
