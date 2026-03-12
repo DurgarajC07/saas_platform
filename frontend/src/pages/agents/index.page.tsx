@@ -203,16 +203,16 @@ export function AgentListPage() {
             </div>
 
             <Select
-              value={search.status}
+              value={search.status || 'all'}
               onValueChange={(v) => {
-                setSearch({ status: v })
+                setSearch({ status: v === 'all' ? '' : v })
               }}
             >
               <SelectTrigger className="w-[140px]">
                 <SelectValue placeholder="All statuses" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All statuses</SelectItem>
+                <SelectItem value="all">All statuses</SelectItem>
                 {AGENT_STATUSES.map((s) => (
                   <SelectItem key={s} value={s}>
                     {AGENT_STATUS_LABELS[s]}
@@ -222,16 +222,16 @@ export function AgentListPage() {
             </Select>
 
             <Select
-              value={search.type}
+              value={search.type || 'all'}
               onValueChange={(v) => {
-                setSearch({ type: v })
+                setSearch({ type: v === 'all' ? '' : v })
               }}
             >
               <SelectTrigger className="w-[160px]">
                 <SelectValue placeholder="All types" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All types</SelectItem>
+                <SelectItem value="all">All types</SelectItem>
                 {AGENT_TYPES.map((t) => (
                   <SelectItem key={t} value={t}>
                     {AGENT_TYPE_LABELS[t]}

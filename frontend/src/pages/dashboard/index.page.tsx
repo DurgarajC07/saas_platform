@@ -1,15 +1,13 @@
 import { useMemo } from 'react'
-import { PhoneCall, Phone, Bot, Gauge, Clock, ArrowRight } from 'lucide-react'
+import { PhoneCall, Phone, Bot, Gauge, ArrowRight } from 'lucide-react'
 import { Link } from '@tanstack/react-router'
-import { formatDistanceToNow } from 'date-fns'
-import { useOverview, useLiveCallsSnapshot } from '@/features/dashboard/hooks'
+import { useOverview } from '@/features/dashboard/hooks'
 import { CallVolumeChart } from '@/features/dashboard/components/CallVolumeChart'
 import { AgentPerfTable } from '@/features/dashboard/components/AgentPerfTable'
 import { StatCard } from '@/shared/components/data-display/StatCard'
 import { PageContainer } from '@/shared/components/layout/PageContainer'
 import { PageHeader } from '@/shared/components/layout/PageHeader'
 import { Button } from '@/shared/components/ui/button'
-import { Badge } from '@/shared/components/ui/badge'
 import { Skeleton } from '@/shared/components/ui/skeleton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/components/ui/card'
 import type { DashboardOverview } from '@/features/dashboard/schemas'
@@ -65,8 +63,8 @@ function useStatCards(data: DashboardOverview | undefined, isLoading: boolean) {
 
 // ── Live call mini-list ───────────────────────────────────────────────────────
 function LiveCallList() {
-  const { data, isLoading } = useLiveCallsSnapshot()
-  const calls = data?.calls ?? []
+  const { data, isLoading } = useOverview()
+  const activeCalls = data?.activeCalls ?? 0
 
   return (
     <Card>
@@ -78,42 +76,30 @@ function LiveCallList() {
           </Link>
         </Button>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent>
         {isLoading ? (
-          Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full rounded-lg" />
-          ))
-        ) : calls.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            No active calls right now.
-          </p>
+          <div className="space-y-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-12 w-full rounded-lg" />
+            ))}
+          </div>
         ) : (
-          calls.slice(0, 6).map((call) => (
-            <div
-              key={call.id}
-              className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm"
-            >
-              <div className="flex items-center gap-3">
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                </span>
-                <div>
-                  <p className="font-medium">{call.callerNumber}</p>
-                  <p className="text-xs text-muted-foreground">{call.agentName}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <Clock className="h-3 w-3" />
-                <span className="text-xs">
-                  {formatDistanceToNow(new Date(call.startedAt), { addSuffix: false })}
-                </span>
-                <Badge variant="secondary" className="text-xs capitalize">
-                  {call.status.replace('_', ' ')}
-                </Badge>
-              </div>
-            </div>
-          ))
+          <div className="flex flex-col items-center justify-center py-8 gap-3">
+            <span className="relative flex h-4 w-4">
+              {activeCalls > 0 && (
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              )}
+              <span
+                className={`relative inline-flex h-4 w-4 rounded-full ${
+                  activeCalls > 0 ? 'bg-emerald-500' : 'bg-muted-foreground/30'
+                }`}
+              />
+            </span>
+            <p className="text-3xl font-bold tabular-nums">{activeCalls}</p>
+            <p className="text-sm text-muted-foreground">
+              {activeCalls === 1 ? 'active call' : 'active calls'}
+            </p>
+          </div>
         )}
       </CardContent>
     </Card>
