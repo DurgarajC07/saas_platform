@@ -36,6 +36,8 @@ export const useAuthStore = create<AuthState>()(
         set({
           token: data.accessToken,
           refreshToken: data.refreshToken,
+          // Persist org_id from login response so subsequent requests include it
+          ...(data.orgId != null ? { orgId: data.orgId } : {}),
           isAuthenticated: true,
         }),
 

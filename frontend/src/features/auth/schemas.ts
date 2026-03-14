@@ -69,6 +69,7 @@ export interface TokenResponse {
   refreshToken: string
   tokenType: string
   expiresIn: number
+  orgId?: string | null // primary org embedded in JWT; null/absent for users with no org
 }
 
 /** Returned by POST /auth/login when 2FA is enabled (HTTP 200) */

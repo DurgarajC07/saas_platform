@@ -13,11 +13,14 @@ export const apiClient = axios.create({
   },
 })
 
-// ── Request interceptor: inject Authorization + X-Org-ID ────────────────────
+// ── Request interceptor: inject Authorization + org-context headers ─────────
 apiClient.interceptors.request.use((config) => {
   const { token, orgId } = useAuthStore.getState()
   if (token) config.headers.Authorization = `Bearer ${token}`
-  if (orgId) config.headers['X-Org-ID'] = orgId
+  if (orgId) {
+    config.headers['X-Org-ID'] = orgId
+    config.headers['X-Organization-ID'] = orgId
+  }
   return config
 })
 
