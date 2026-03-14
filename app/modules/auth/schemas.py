@@ -77,6 +77,7 @@ class TokenResponse(CamelModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds until access token expiry
+    org_id: UUID | None = None  # primary org embedded in the JWT; None for users with no org
 
 
 class UpdateProfileRequest(CamelModel):

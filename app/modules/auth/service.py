@@ -60,6 +60,7 @@ from app.modules.auth.schemas import (
     TokenResponse,
     UpdateProfileRequest,
 )
+from app.modules.tenancy.repository import OrganizationUserRepository, OrganizationRepository
 from app.shared.enums import TokenType
 
 logger = structlog.get_logger(__name__)
@@ -118,6 +119,15 @@ class AuthService:
         refresh_token = create_refresh_token(user.id)
         token_hash = _hash_token(refresh_token)
 
+        # Resolve user's primary org so we can embed org_id in the JWT.
+        # For platform admins with no personal org membership, fall back to the
+        # first active org in the system so they always get a working context.
+        ou_repo = OrganizationUserRepository(self.session)
+        primary_org_id = await ou_repo.get_first_active_org_for_user(user.id)
+        if primary_org_id is None and user.is_platform_admin:
+            org_repo = OrganizationRepository(self.session)
+            primary_org_id = await org_repo.get_first_active_org()
+
         expires_at = datetime.now(UTC) + timedelta(
             days=settings.REFRESH_TOKEN_EXPIRE_DAYS
         )
@@ -133,8 +143,8 @@ class AuthService:
             expires_at=expires_at,
         )
 
-        # Mint access token with session ID claim (for session listing)
-        access_token = create_access_token(user.id, session_id=session_id)
+        # Mint access token with session ID claim and org_id (for tenant context)
+        access_token = create_access_token(user.id, org_id=primary_org_id, session_id=session_id)
 
         # Stamp last-login metadata and clear failed attempts counter
         now = datetime.now(UTC)
@@ -153,6 +163,7 @@ class AuthService:
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            org_id=primary_org_id,
         )
 
     # ── Public operations ─────────────────────────────────────────────────
