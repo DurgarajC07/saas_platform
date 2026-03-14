@@ -47,7 +47,7 @@ async def get_current_org_id(request: Request) -> UUID:
     org_id: UUID | None = getattr(request.state, "org_id", None)
     if org_id is None:
         raise ForbiddenException(
-            "Organization context required — provide X-Org-Id or X-Org-Slug header"
+            "Organization context required — provide X-Organization-ID or X-Org-ID header"
         )
     return org_id
 

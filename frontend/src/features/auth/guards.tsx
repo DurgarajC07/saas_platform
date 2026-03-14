@@ -21,7 +21,7 @@ export function AuthGuard({ children }: GuardProps) {
 export function GuestGuard({ children }: GuardProps) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   if (isAuthenticated) {
-    return <Navigate to="/dashboard" />
+    return <Navigate to="/" />
   }
   return <>{children}</>
 }
@@ -42,6 +42,6 @@ export function requireGuest() {
   const isAuthenticated = useAuthStore.getState().isAuthenticated
   if (isAuthenticated) {
     // eslint-disable-next-line @typescript-eslint/only-throw-error
-    throw redirect({ to: '/dashboard' })
+    throw redirect({ to: '/' })
   }
 }
