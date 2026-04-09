@@ -1,0 +1,262 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Infrastructure Stack  —  docker-compose.infra.yml
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Services managed here
+# ─────────────────────
+#   whisper-1   faster-whisper Large-V3-Turbo    GPU    port 9001
+#   whisper-2   faster-whisper Large-V3-Turbo    GPU    port 9002  (2nd worker)
+#   kokoro-1    Kokoro-82M TTS                   CPU    port 8881
+#   kokoro-2    Kokoro-82M TTS                   CPU    port 8882  (2nd worker)
+#   qdrant      Qdrant vector DB                 CPU    port 6333 / 6334
+#   minio       MinIO S3-compatible storage      CPU    port 9100 / 9101
+#
+# Services intentionally NOT here (already running)
+# ─────────────────────────────────────────────────
+#   postgres    — Docker container  `saas-postgres`  → localhost:5432
+#   valkey      — Native system service              → localhost:6379
+#   ollama      — Native process (Qwen 3B)           → localhost:11434
+#
+# How containers reach the host machine
+# ──────────────────────────────────────
+#   All services have `host.docker.internal` mapped via `extra_hosts` so they
+#   can call Ollama and Valkey on the host without special network tricks.
+#
+# NVIDIA prerequisite
+# ────────────────────
+#   Run `make nvidia-docker-setup` if the `nvidia` Docker runtime is missing.
+#   Whisper containers will not start without it.
+#
+# Usage
+# ─────
+#   make infra-up          Start all services
+#   make infra-down        Stop and remove containers + networks
+#   make infra-logs        Tail logs for all infra services
+#   make infra-ps          Show running infra containers
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: voice-ai-infra
+
+x-whisper-common: &whisper-common
+  build:
+    context: ./services/whisper
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  volumes:
+    - whisper_models:/app/models
+  environment:
+    MODEL: ${WHISPER_MODEL:-large-v3-turbo}
+    DEVICE: cuda
+    COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-float16}
+    NUM_WORKERS: "2"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  networks:
+    - ai-net
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  healthcheck:
+    test: ["CMD", "python3", "-c",
+           "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
+    interval: 30s
+    timeout: 10s
+    start_period: 120s
+    retries: 3
+
+x-kokoro-common: &kokoro-common
+  build:
+    context: ./services/kokoro
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  volumes:
+    - kokoro_models:/app/models
+  environment:
+    DEFAULT_VOICE: ${KOKORO_DEFAULT_VOICE:-af_heart}
+    DEFAULT_SPEED: ${KOKORO_DEFAULT_SPEED:-1.0}
+    DEFAULT_LANG: ${KOKORO_DEFAULT_LANG:-a}
+    HF_HOME: /app/models
+  networks:
+    - ai-net
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  healthcheck:
+    test: ["CMD", "python", "-c",
+           "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')"]
+    interval: 20s
+    timeout: 10s
+    start_period: 90s
+    retries: 3
+
+services:
+  # ── Whisper STT workers ─────────────────────────────────────────────────────
+  # Each worker has its own GPU context; add more workers as VRAM allows.
+  # Whisper Large-V3-Turbo uses ~3.1 GB VRAM — RTX 4060 8GB fits 2 at once
+  # if Ollama is offloaded to CPU, otherwise keep 1.
+  whisper-1:
+    <<: *whisper-common
+    container_name: whisper-1
+    ports:
+      - "9001:9000"
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  whisper-2:
+    <<: *whisper-common
+    container_name: whisper-2
+    ports:
+      - "9002:9000"
+    profiles:
+      - whisper-multi   # docker compose --profile whisper-multi up to start this
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  # ── Kokoro TTS workers ──────────────────────────────────────────────────────
+  # CPU-based — 82M model is fast enough on CPU for real-time TTS.
+  # 4 workers total across 2 containers; each container runs 2 uvicorn workers.
+  kokoro-1:
+    <<: *kokoro-common
+    container_name: kokoro-1
+    ports:
+      - "8881:8880"
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  kokoro-2:
+    <<: *kokoro-common
+    container_name: kokoro-2
+    ports:
+      - "8882:8880"
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  # ── Qdrant vector database ──────────────────────────────────────────────────
+  # Per-org collections for RAG knowledge bases.
+  # REST:  http://localhost:6333  |  gRPC: localhost:6334
+  # Dashboard: http://localhost:6333/dashboard
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API + dashboard
+      - "6334:6334"   # gRPC (preferred for production — lower overhead)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__LOG_LEVEL: INFO
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    networks:
+      - ai-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  # ── MinIO — S3-compatible call recording storage ────────────────────────────
+  # API:     http://localhost:9100   (maps to container 9000)
+  # Console: http://localhost:9101   (maps to container 9001)
+  # Credentials set via MINIO_ROOT_USER / MINIO_ROOT_PASSWORD env vars.
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "9100:9000"   # S3 API  — used by FastAPI app (boto3 / aioboto3)
+      - "9101:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_DEFAULT_BUCKETS: ${MINIO_BUCKETS:-call-recordings,file-uploads}
+    networks:
+      - ai-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+  # ── Pipeline orchestration service ──────────────────────────────────────────
+  # Pipecat-based real-time call engine.
+  # Exposes:  POST /sessions  WS /sessions/{id}/ws  GET /health
+  # Port 7000 is the single entry point for voice SDK clients.
+  pipeline:
+    build:
+      context: ./services/pipeline
+      dockerfile: Dockerfile
+    container_name: pipeline
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    environment:
+      HOST_WHISPER_URL: "ws://whisper-1:9000/transcribe/stream"
+      HOST_KOKORO_URL: "ws://kokoro-1:8880/tts/stream"
+      HOST_QDRANT_URL: "http://qdrant:6333"
+      HOST_OLLAMA_URL: "http://host.docker.internal:11434"
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+      MINIO_BUCKET: "call-recordings"
+      RECORDING_ENABLED: "${RECORDING_ENABLED:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    depends_on:
+      - whisper-1
+      - kokoro-1
+      - qdrant
+      - minio
+    networks:
+      - ai-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7000/health')"]
+      interval: 20s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+volumes:
+  whisper_models:
+    name: whisper_models          # persist model download across rebuilds
+  kokoro_models:
+    name: kokoro_models
+  qdrant_data:
+    name: qdrant_data
+  minio_data:
+    name: minio_data
+
+# ── Shared network ────────────────────────────────────────────────────────────
+networks:
+  ai-net:
+    name: ai-net
+    driver: bridge

@@ -83,6 +83,19 @@ class OrganizationRepository:
         )
         await self.session.flush()
 
+    async def get_first_active_org(self) -> UUID | None:
+        """Return the id of the first active org in the system (for platform admin fallback)."""
+        result = await self.session.execute(
+            select(Organization.id)
+            .where(
+                Organization.deleted_at.is_(None),
+                Organization.is_active.is_(True),
+            )
+            .order_by(Organization.created_at)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
 
 # ── OrganizationUserRepository ────────────────────────────────────────────
 
@@ -104,6 +117,25 @@ class OrganizationUserRepository:
     async def get_by_id(self, member_id: UUID) -> OrganizationUser | None:
         result = await self.session.execute(
             select(OrganizationUser).where(OrganizationUser.id == member_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_first_active_org_for_user(self, user_id: UUID) -> UUID | None:
+        """Return the organization_id of the user's first active membership, or None."""
+        result = await self.session.execute(
+            select(OrganizationUser.organization_id)
+            .join(
+                Organization,
+                Organization.id == OrganizationUser.organization_id,
+            )
+            .where(
+                OrganizationUser.user_id == user_id,
+                OrganizationUser.status == "active",
+                Organization.deleted_at.is_(None),
+                Organization.is_active.is_(True),
+            )
+            .order_by(OrganizationUser.joined_at)
+            .limit(1)
         )
         return result.scalar_one_or_none()
 

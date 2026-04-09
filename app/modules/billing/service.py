@@ -49,9 +49,12 @@ from app.modules.billing.repository import (
 )
 from app.modules.billing.schemas import (
     AddPaymentMethodRequest,
+    BillingUsageResponse,
     CancelSubscriptionRequest,
     CreatePlanRequest,
+    InvoiceLineItem,
     InvoiceListResponse,
+    InvoicePreviewResponse,
     InvoiceResponse,
     PaymentMethodListResponse,
     PaymentMethodResponse,
@@ -594,6 +597,109 @@ class BillingService:
         if not sub:
             return None
         return SubscriptionResponse.model_validate(sub)
+
+    # ── Usage & invoice preview ──────────────────────────────────────────
+
+    async def get_usage(self, org_id: UUID) -> BillingUsageResponse:
+        """
+        Return current-month call-minute consumption for *org_id*.
+
+        Reads the Redis counter written by ``CallCreditService`` and the
+        active subscription plan for the monthly quota.
+        """
+        from app.modules.agents.credits import CallCreditService
+
+        credit_svc = CallCreditService(self._session, self._redis)
+        usage = await credit_svc.get_usage(org_id)  # MinutesUsage namedtuple
+
+        sub = await self._sub_repo.get_active(org_id)
+        plan_name = sub.plan.name if (sub and sub.plan) else "free"
+
+        ym = datetime.now(UTC).strftime("%Y-%m")
+        cb_key = f"call_minutes:{org_id}:{ym}"
+        raw = await self._redis.get(cb_key)
+        credit_balance = int(raw) if raw else 0
+
+        remaining: int | None = None
+        if usage.allowed_minutes is not None and usage.allowed_minutes > 0:
+            remaining = max(0, usage.allowed_minutes - usage.used_minutes)
+
+        return BillingUsageResponse(
+            org_id=org_id,
+            period=ym,
+            used_seconds=usage.used_minutes * 60,
+            used_minutes=usage.used_minutes,
+            allowed_minutes=usage.allowed_minutes if (usage.allowed_minutes and usage.allowed_minutes > 0) else None,
+            remaining_minutes=remaining,
+            credit_balance=credit_balance,
+            plan_name=plan_name,
+        )
+
+    async def get_invoice_preview(self, org_id: UUID) -> InvoicePreviewResponse:
+        """
+        Estimate the invoice for the current billing period.
+
+        Line items are built from:
+        1. Base plan monthly price.
+        2. Overage minutes (minutes beyond the plan quota) billed at the
+           per-minute rate stored in ``plan.features['overage_rate_usd']``
+           (defaults to 0.01 if not set).
+        """
+        from decimal import ROUND_HALF_UP
+
+        usage_resp = await self.get_usage(org_id)
+        sub = await self._sub_repo.get_active(org_id)
+        ym = datetime.now(UTC).strftime("%Y-%m")
+
+        line_items: list[InvoiceLineItem] = []
+        currency = "USD"
+        subtotal = 0.0
+
+        if sub and sub.plan:
+            plan = sub.plan
+            currency = plan.currency or "USD"
+            base_price = float(plan.price_monthly or 0)
+            line_items.append(InvoiceLineItem(
+                description=f"{plan.name} — base plan (monthly)",
+                quantity=1,
+                unit_price=base_price,
+                amount=base_price,
+            ))
+            subtotal += base_price
+
+            # Overage
+            if (
+                usage_resp.allowed_minutes is not None
+                and usage_resp.allowed_minutes > 0
+                and usage_resp.used_minutes > usage_resp.allowed_minutes
+            ):
+                overage_mins = usage_resp.used_minutes - usage_resp.allowed_minutes
+                features: dict = plan.features or {}
+                rate: float = float(features.get("overage_rate_usd", 0.01))
+                overage_cost = round(overage_mins * rate, 4)
+                line_items.append(InvoiceLineItem(
+                    description=f"Overage — {overage_mins} minutes @ ${rate:.4f}/min",
+                    quantity=float(overage_mins),
+                    unit_price=rate,
+                    amount=overage_cost,
+                ))
+                subtotal += overage_cost
+        else:
+            line_items.append(InvoiceLineItem(
+                description="Free plan — no charge",
+                quantity=1,
+                unit_price=0.0,
+                amount=0.0,
+            ))
+
+        return InvoicePreviewResponse(
+            org_id=org_id,
+            period=ym,
+            line_items=line_items,
+            subtotal=round(subtotal, 2),
+            currency=currency,
+            estimated_at=datetime.now(UTC),
+        )
 
     @staticmethod
     def _require_platform_admin(user: User) -> None:

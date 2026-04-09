@@ -45,9 +45,12 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
 from app.modules.billing.schemas import (
     AddPaymentMethodRequest,
+    BillingUsageResponse,
     CancelSubscriptionRequest,
     CreatePlanRequest,
+    InvoiceLineItem,
     InvoiceListResponse,
+    InvoicePreviewResponse,
     InvoiceResponse,
     PaymentMethodListResponse,
     PaymentMethodResponse,
@@ -354,3 +357,48 @@ async def razorpay_webhook(request: Request) -> WebhookAckResponse:
     are not yet implemented.  Returns 200 to prevent Razorpay retries.
     """
     return WebhookAckResponse(received=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Usage & Invoice Preview
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get(
+    "/usage",
+    response_model=BillingUsageResponse,
+    summary="Current-month call-minute consumption",
+)
+async def get_billing_usage(
+    db: DB,
+    redis: Redis,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> BillingUsageResponse:
+    """
+    Returns the org’s current-month call-minute usage alongside the plan’s
+    monthly quota.  Reads the Redis counter written by the pipeline on each
+    call completion.
+    """
+    from app.modules.billing.providers import get_provider
+
+    svc = BillingService(db, redis, get_provider())
+    return await svc.get_usage(current_user.organization_id)
+
+
+@router.get(
+    "/invoice-preview",
+    response_model=InvoicePreviewResponse,
+    summary="Estimated invoice for the current billing period",
+)
+async def get_invoice_preview(
+    db: DB,
+    redis: Redis,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> InvoicePreviewResponse:
+    """
+    Returns an estimated invoice for the current calendar-month period,
+    including base plan costs and any overage charges.
+    """
+    from app.modules.billing.providers import get_provider
+
+    svc = BillingService(db, redis, get_provider())
+    return await svc.get_invoice_preview(current_user.organization_id)

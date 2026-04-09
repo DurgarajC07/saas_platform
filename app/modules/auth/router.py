@@ -63,6 +63,7 @@ from app.modules.auth.schemas import (
     LogoutRequest,
     MessageResponse,
     OAuthRedirectResponse,
+    OAuthProvidersResponse,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -71,6 +72,7 @@ from app.modules.auth.schemas import (
     Setup2FAResponse,
     TokenResponse,
     TwoFactorChallengeResponse,
+    UpdateProfileRequest,
     UserResponse,
     Verify2FARequest,
 )
@@ -275,10 +277,38 @@ async def me(
     return current_user
 
 
+@router.patch(
+    "/me",
+    response_model=UserResponse,
+    summary="Update current user profile",
+)
+async def update_me(
+    data: UpdateProfileRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    deps: Annotated[AuthDeps, Depends()],
+) -> User:
+    """Update mutable profile fields (name, timezone, locale, avatar, phone)."""
+    svc = AuthService(deps.db, deps.redis)
+    return await svc.update_profile(current_user, data)
+
+
 # ── OAuth2 ─────────────────────────────────────────────────────────────────
 
-@router.get(
-    "/oauth/{provider}",
+@router.get(    "/oauth/providers",
+    response_model=OAuthProvidersResponse,
+    summary="List configured OAuth2 providers",
+)
+async def oauth_providers() -> OAuthProvidersResponse:
+    """
+    Return the list of OAuth2 providers that have credentials configured.
+    The frontend uses this to conditionally show/hide social login buttons.
+    """
+    from app.modules.auth.oauth_service import _get_providers
+
+    return OAuthProvidersResponse(providers=list(_get_providers().keys()))
+
+
+@router.get(    "/oauth/{provider}",
     response_model=OAuthRedirectResponse,
     summary="Initiate OAuth2 social login",
 )

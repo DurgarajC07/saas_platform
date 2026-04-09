@@ -1,0 +1,233 @@
+# VoiceSaaS Platform — Production Compose
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-command deployment:
+#
+#   cp .env.example .env          # fill secrets
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   • Docker Engine >= 24 and Compose v2
+#   • .env with all required variables (see .env.example)
+#   • Optional: GPU host with nvidia-docker for VRAM-aware routing
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-api-env: &api-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-saas_db}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+  QDRANT_URL: http://qdrant:6333
+  APP_ENV: production
+  SECRET_KEY: ${SECRET_KEY}
+  JWT_SECRET: ${JWT_SECRET}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+  TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  PIPELINE_BASE_URL: http://pipeline:8001
+
+services:
+  # ── API (FastAPI / gunicorn + uvicorn workers) ──────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: voicesaas-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      <<: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    networks: [saas-net]
+    volumes:
+      - uploads:/tmp/uploads
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # ── Celery worker ───────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: voicesaas-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: >
+      celery -A app.core.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=default,emails,maintenance
+    environment:
+      <<: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks: [saas-net]
+    volumes:
+      - uploads:/tmp/uploads
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  # ── Celery beat (periodic tasks) ────────────────────────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: voicesaas-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: >
+      celery -A app.core.celery_app beat
+      --loglevel=info
+      --scheduler redbeat.RedBeatScheduler
+    environment:
+      <<: *api-env
+    depends_on:
+      - redis
+    networks: [saas-net]
+    logging: *default-logging
+
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-saas_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [saas-net]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ── Redis 7 ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 100
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    networks: [saas-net]
+    logging: *default-logging
+
+  # ── Qdrant vector store ─────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.8.3
+    restart: unless-stopped
+    # NOT exposed to host: only api/worker can reach it on saas-net
+    expose: ["6333", "6334"]
+    volumes:
+      - qdrantdata:/qdrant/storage
+    networks: [saas-net]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ── Alembic migration job (runs once, exits) ────────────────────────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: voicesaas-api:${IMAGE_TAG:-latest}
+    command: alembic upgrade head
+    environment:
+      <<: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [saas-net]
+    restart: "no"
+    profiles: [migrate]
+
+  # ── Seed demo agents (run once) ─────────────────────────────────────────────
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: voicesaas-api:${IMAGE_TAG:-latest}
+    command: python scripts/seed_demo_agents.py --org-slug=${DEMO_ORG_SLUG:-demo-org}
+    environment:
+      <<: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [saas-net]
+    restart: "no"
+    profiles: [seed]
+
+  # ── Frontend (React + nginx) ────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api/v1
+        VITE_APP_ENV: production
+    image: voicesaas-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [saas-net]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+volumes:
+  pgdata:
+  redisdata:
+  qdrantdata:
+  uploads:
+
+networks:
+  saas-net:
+    driver: bridge

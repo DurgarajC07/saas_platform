@@ -1,0 +1,676 @@
+"""
+Session manager for the Pipeline Service.
+
+``SessionManager`` maintains an in-memory registry of active pipeline sessions
+and exposes an async-safe API used by ``server.py``:
+
+* ``create()``   — allocate a session, build the pipeline, return ``SessionInfo``
+* ``get()``      — look up a session by ID
+* ``end()``      — tear down the pipeline and remove from registry
+* ``run_ws()``   — run the full WebSocket → Pipeline → WebSocket loop
+* ``active_count()`` — number of live sessions (used by /health)
+
+Thread safety
+-------------
+All mutations are protected by a single ``asyncio.Lock`` so that concurrent
+``POST /sessions`` requests can never stomp each other.  Pipecat pipelines run
+as isolated ``asyncio.Task`` objects; each task is tracked and cancelled on
+``end()``.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Dict
+
+import structlog
+from fastapi import WebSocket
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+
+from call_recorder import CallRecorder
+from metrics import get_metrics
+from pipeline_builder import PipelineBuilder
+from schemas import AgentConfig, SessionInfo, LANGUAGE_VOICE_MAP
+from transports.websocket import make_ws_transport
+
+log: structlog.BoundLogger = structlog.get_logger(__name__)
+
+_BUSY_TEXT = "All agents are currently busy. Please try again in a moment."
+
+
+async def _send_busy_response(ws: WebSocket) -> None:
+    """
+    Accept the WebSocket, deliver a capacity-exceeded event, and close.
+
+    The client receives:
+    * A JSON text frame: ``{"event": "busy", "detail": "<message>"}``
+    * WebSocket close code 1008 (Policy Violation)
+    """
+    try:
+        await ws.send_text(json.dumps({"event": "busy", "detail": _BUSY_TEXT}))
+    except Exception:
+        pass
+    finally:
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
+
+
+class _SessionState:
+    """Internal holder for a running session."""
+
+    __slots__ = (
+        "info",
+        "config",
+        "task",
+        "recorder",
+        "created_at",
+        "detected_language",
+        "tts_processor",
+        "webrtc_transport",
+    )
+
+    def __init__(
+        self,
+        info: SessionInfo,
+        config: AgentConfig,
+        task: asyncio.Task | None = None,
+        recorder: CallRecorder | None = None,
+    ) -> None:
+        self.info = info
+        self.config = config
+        self.task = task
+        self.recorder = recorder
+        self.created_at = datetime.now(tz=timezone.utc)
+        self.detected_language: str | None = None
+        self.tts_processor = None  # KokoroTTSProcessor, set after pipeline build
+        self.webrtc_transport = None  # WebRTCTransport | None
+
+
+class SessionManager:
+    """
+    Manages the lifecycle of active pipeline sessions.
+
+    Must be initialised once at application startup via ``startup()`` and
+    cleanly shut down via ``shutdown()`` so that all in-flight sessions are
+    gracefully terminated.
+    """
+
+    #: Hard cap on simultaneous active calls — tuned for RTX 4060 (8 GB VRAM).
+    MAX_CONCURRENT_CALLS: int = 3
+
+    def __init__(self) -> None:
+        self._sessions: Dict[str, _SessionState] = {}
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def startup(self) -> None:
+        log.info("session_manager_started")
+
+    async def shutdown(self) -> None:
+        """Cancel all active pipeline tasks and wait for them to finish."""
+        session_ids = list(self._sessions.keys())
+        log.info("session_manager_shutdown_start", active=len(session_ids))
+        await asyncio.gather(
+            *(self.end(sid) for sid in session_ids), return_exceptions=True
+        )
+        log.info("session_manager_shutdown_complete")
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    async def create(
+        self,
+        agent_config: AgentConfig,
+        call_id: str,
+        metadata: dict,
+        *,
+        base_url: str = "ws://localhost:7000",
+    ) -> SessionInfo:
+        """
+        Allocate a new session.
+
+        Parameters
+        ----------
+        agent_config:
+            Fully-populated agent configuration.
+        call_id:
+            Caller-supplied identifier for the call (used for recording path).
+        metadata:
+            Arbitrary JSON metadata stored in ``SessionInfo``.
+        base_url:
+            Base WebSocket URL prepended to the session's ``ws_url``.
+
+        Returns
+        -------
+        SessionInfo
+            Newly created session descriptor.
+        """
+        session_id = str(uuid.uuid4())
+        ws_url = f"{base_url}/sessions/{session_id}/ws"
+        info = SessionInfo(
+            session_id=session_id,
+            agent_id=str(agent_config.agent_id),
+            call_id=call_id,
+            status="idle",
+            ws_url=ws_url,
+            created_at=datetime.now(tz=timezone.utc).isoformat(),
+            metadata=metadata,
+        )
+        state = _SessionState(info=info, config=agent_config)
+
+        async with self._lock:
+            self._sessions[session_id] = state
+
+        log.info(
+            "session_created",
+            session_id=session_id,
+            agent_id=info.agent_id,
+            call_id=call_id,
+        )
+        return info
+
+    def get(self, session_id: str) -> SessionInfo | None:
+        """Return the ``SessionInfo`` for *session_id*, or ``None``."""
+        state = self._sessions.get(session_id)
+        return state.info if state else None
+
+    async def end(self, session_id: str) -> bool:
+        """
+        Tear down the session with *session_id*.
+
+        Cancels the running pipeline task (if any), flushes the call
+        recorder, and removes the session from the registry.
+
+        Returns
+        -------
+        bool
+            ``True`` if the session existed and was removed, ``False`` if not
+            found.
+        """
+        async with self._lock:
+            state = self._sessions.pop(session_id, None)
+
+        if state is None:
+            return False
+
+        # Cancel the pipeline task
+        if state.task and not state.task.done():
+            state.task.cancel()
+            try:
+                await state.task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # Flush call recording
+        if state.recorder:
+            try:
+                await state.recorder.finish()
+            except Exception as exc:
+                log.warning(
+                    "call_recorder_flush_failed",
+                    session_id=session_id,
+                    error=str(exc),
+                )
+
+        log.info("session_ended", session_id=session_id)
+        return True
+
+    def active_count(self) -> int:
+        """Return the number of sessions currently in the registry."""
+        count = len(self._sessions)
+        _m = get_metrics()
+        if _m is not None:
+            _m.set_active_sessions(count)
+        return count
+
+    # ------------------------------------------------------------------
+    # WebRTC runner
+    # ------------------------------------------------------------------
+
+    async def setup_webrtc(
+        self,
+        session_id: str,
+        offer_sdp: str,
+        offer_type: str = "offer",
+    ) -> tuple[str, str] | None:
+        """
+        Perform the SDP offer/answer exchange for *session_id* and start the
+        WebRTC pipeline in a background task.
+
+        Returns ``(answer_sdp, answer_type)`` on success, or ``None`` when the
+        session is not found or a WebRTC connection is already active.
+        """
+        from transports.webrtc import WebRTCTransport, create_answer
+
+        state = self._sessions.get(session_id)
+        if state is None:
+            log.warning("setup_webrtc.session_not_found", session_id=session_id)
+            return None
+        if state.webrtc_transport is not None:
+            log.warning("setup_webrtc.already_configured", session_id=session_id)
+            return None
+
+        pc, answer_sdp, answer_type = await create_answer(offer_sdp, offer_type)
+        transport = WebRTCTransport(pc)
+
+        @pc.on("track")
+        def _on_track(track) -> None:  # type: ignore[no-untyped-def]
+            if track.kind == "audio":
+                transport.attach_track(track)
+                log.info(
+                    "setup_webrtc.inbound_track_attached",
+                    session_id=session_id,
+                )
+
+        state.webrtc_transport = transport
+
+        asyncio.create_task(
+            self._run_webrtc_pipeline(session_id),
+            name=f"webrtc_pipeline_{session_id}",
+        )
+
+        log.info(
+            "setup_webrtc.done",
+            session_id=session_id,
+            answer_type=answer_type,
+        )
+        return answer_sdp, answer_type
+
+    async def _run_webrtc_pipeline(self, session_id: str) -> None:
+        """
+        Run the full pipeline lifecycle for a WebRTC session.
+
+        This mirrors ``run_ws()`` but drives the pipeline through a
+        ``WebRTCTransport`` instead of a ``FastAPIWebsocketTransport``.
+        """
+        state = self._sessions.get(session_id)
+        if state is None or state.webrtc_transport is None:
+            log.warning("run_webrtc.not_ready", session_id=session_id)
+            return
+
+        # ── Concurrency gate ─────────────────────────────────────────────────
+        active_running = sum(
+            1 for s in self._sessions.values()
+            if s.info.status == "active"
+        )
+        if active_running >= self.MAX_CONCURRENT_CALLS:
+            log.warning(
+                "session_capacity_reached",
+                active=active_running,
+                max=self.MAX_CONCURRENT_CALLS,
+                session_id=session_id,
+            )
+            return
+
+        state.info.status = "active"
+        config = state.config
+        transport = state.webrtc_transport
+
+        # ── Language-adaptive TTS callback ──────────────────────────────────
+        async def _on_transcription(text: str, language: str | None) -> None:
+            if not language or state.detected_language == language:
+                return
+            state.detected_language = language
+            log.info(
+                "language_detected",
+                session_id=session_id,
+                language=language,
+            )
+            if state.tts_processor is not None:
+                voice = LANGUAGE_VOICE_MAP.get(language, config.tts_voice)
+                state.tts_processor.set_voice(voice, language)
+                log.info(
+                    "tts_voice_updated",
+                    session_id=session_id,
+                    language=language,
+                    voice=voice,
+                )
+
+        # ── Optional call recorder ───────────────────────────────────────────
+        recorder: CallRecorder | None = None
+        try:
+            recorder = CallRecorder(
+                session_id=session_id,
+                call_id=state.info.call_id,
+                organization_id=str(config.organization_id),
+            )
+            await recorder.start()
+            state.recorder = recorder
+        except Exception as exc:
+            log.warning(
+                "call_recorder_start_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
+        # ── Build + run pipeline ─────────────────────────────────────────────
+        builder = PipelineBuilder(config)
+        pipeline = await builder.build_for_webrtc(
+            transport,
+            on_transcription=_on_transcription,
+            recorder=recorder,
+        )
+        state.tts_processor = builder.tts_processor
+
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(allow_interruptions=config.allow_interruptions),
+            enable_rtvi=False,
+        )
+        runner = PipelineRunner()
+
+        async def _run() -> None:
+            await runner.run(task)
+
+        pipeline_task = asyncio.create_task(
+            _run(), name=f"pipeline_{session_id}"
+        )
+        state.task = pipeline_task
+
+        log.info("webrtc_pipeline_task_started", session_id=session_id)
+        e2e_start = time.perf_counter()
+        try:
+            await pipeline_task
+        except asyncio.CancelledError:
+            log.info("webrtc_pipeline_task_cancelled", session_id=session_id)
+        except Exception as exc:
+            log.error(
+                "webrtc_pipeline_task_error",
+                session_id=session_id,
+                error=str(exc),
+                exc_info=True,
+            )
+        finally:
+            e2e_ms = (time.perf_counter() - e2e_start) * 1000
+            _m = get_metrics()
+            if _m is not None:
+                _m.record_e2e_ms(e2e_ms)
+            state.info.status = "ended"
+            if recorder:
+                try:
+                    await recorder.finish()
+                except Exception as exc:
+                    log.warning(
+                        "call_recorder_finish_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            log.info("webrtc_pipeline_done", session_id=session_id)
+
+    # ------------------------------------------------------------------
+    # WebSocket runner
+    # ------------------------------------------------------------------
+
+    async def run_ws(self, session_id: str, ws: WebSocket) -> None:
+        """
+        Run the full pipeline lifecycle on an accepted WebSocket connection.
+
+        This coroutine blocks until the session ends (client disconnect,
+        ``end()`` called by HTTP, or pipeline error).
+
+        Parameters
+        ----------
+        session_id:
+            Must be a session returned by ``create()``.
+        ws:
+            Already-accepted FastAPI ``WebSocket``.
+        """
+        state = self._sessions.get(session_id)
+        if state is None:
+            log.warning("run_ws_session_not_found", session_id=session_id)
+            await ws.close(code=4404)
+            return
+
+        # ── Concurrency gate ──────────────────────────────────────────────────
+        # Count only *active* (pipeline-running) sessions, not idle/ended ones.
+        active_running = sum(
+            1 for s in self._sessions.values()
+            if s.info.status == "active"
+        )
+        if active_running >= self.MAX_CONCURRENT_CALLS:
+            log.warning(
+                "session_capacity_reached",
+                active=active_running,
+                max=self.MAX_CONCURRENT_CALLS,
+                session_id=session_id,
+            )
+            await _send_busy_response(ws)
+            return
+
+        state.info.status = "active"
+        config = state.config
+
+        # ── Build transport + pipeline ─────────────────────────────────
+        transport = make_ws_transport(ws)
+        builder = PipelineBuilder(config)
+
+        async def _on_transcription(text: str, language: str | None) -> None:
+            """Called by WhisperSTTProcessor after each successful transcription.
+
+            Updates the session's detected language and switches the TTS voice
+            so multilingual callers are responded to in their own language.
+            """
+            if not language or state.detected_language == language:
+                return
+            state.detected_language = language
+            log.info(
+                "language_detected",
+                session_id=session_id,
+                language=language,
+            )
+            if state.tts_processor is not None:
+                voice = LANGUAGE_VOICE_MAP.get(language, config.tts_voice)
+                state.tts_processor.set_voice(voice, language)
+                log.info(
+                    "tts_voice_updated",
+                    session_id=session_id,
+                    language=language,
+                    voice=voice,
+                )
+
+        # ── Optional call recorder (created before pipeline so TTS can write to it)
+        recorder: CallRecorder | None = None
+        try:
+            recorder = CallRecorder(
+                session_id=session_id,
+                call_id=state.info.call_id,
+                organization_id=str(config.organization_id),
+            )
+            await recorder.start()
+            state.recorder = recorder
+        except Exception as exc:
+            log.warning(
+                "call_recorder_start_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
+        pipeline = await builder.build(
+            transport, on_transcription=_on_transcription, recorder=recorder
+        )
+        state.tts_processor = builder.tts_processor
+
+        # ── Run pipeline ───────────────────────────────────────────────
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(allow_interruptions=config.allow_interruptions),
+            enable_rtvi=False,   # raw PCM transport — no RTVI handshake required
+        )
+        runner = PipelineRunner()
+
+        async def _run() -> None:
+            await runner.run(task)
+
+        pipeline_task = asyncio.create_task(_run(), name=f"pipeline_{session_id}")
+        state.task = pipeline_task
+
+        log.info("pipeline_task_started", session_id=session_id)
+        e2e_start = time.perf_counter()
+        try:
+            await pipeline_task
+        except asyncio.CancelledError:
+            log.info("pipeline_task_cancelled", session_id=session_id)
+        except Exception as exc:
+            log.error(
+                "pipeline_task_error",
+                session_id=session_id,
+                error=str(exc),
+                exc_info=True,
+            )
+        finally:
+            e2e_ms = (time.perf_counter() - e2e_start) * 1000
+            _m = get_metrics()
+            if _m is not None:
+                _m.record_e2e_ms(e2e_ms)
+            state.info.status = "ended"
+            if recorder:
+                try:
+                    await recorder.finish()
+                except Exception as exc:
+                    log.warning(
+                        "call_recorder_finish_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            log.info("pipeline_ws_loop_done", session_id=session_id)
+
+    # ── Twilio PSTN stream ─────────────────────────────────────────────────────
+
+    async def run_twilio_stream(self, session_id: str, ws: WebSocket) -> None:
+        """
+        Run the full pipeline lifecycle for a Twilio Media Streams WebSocket.
+
+        Twilio connects here after the SaaS platform's TwiML webhook returns
+        ``<Connect><Stream url="wss://…/sessions/{id}/twilio_stream"/></Connect>``.
+
+        Parameters
+        ----------
+        session_id:
+            Session created by ``create()`` (transport="twilio").
+        ws:
+            Already-accepted FastAPI WebSocket from Twilio.
+        """
+        from transports.twilio import make_twilio_transport
+
+        state = self._sessions.get(session_id)
+        if state is None:
+            log.warning("twilio_stream_session_not_found", session_id=session_id)
+            await ws.close(code=4404)
+            return
+
+        # Concurrency gate
+        active_running = sum(
+            1 for s in self._sessions.values()
+            if s.info.status == "active"
+        )
+        if active_running >= self.MAX_CONCURRENT_CALLS:
+            log.warning(
+                "twilio_capacity_reached",
+                active=active_running,
+                session_id=session_id,
+            )
+            # Can't send busy text over Twilio WS — just close it so
+            # Twilio falls through to the next <Say> or <Hangup> in TwiML.
+            await ws.close(code=1013)  # 1013 = Try Again Later
+            return
+
+        state.info.status = "active"
+        config = state.config
+
+        # ── Build transport ───────────────────────────────────────────────
+        transport = make_twilio_transport(ws)
+
+        # ── Start inbound reader (fills transport queue in the background) ─
+        reader_task = asyncio.create_task(
+            transport.run_reader(), name=f"twilio_reader_{session_id}"
+        )
+
+        # ── Language-adaptive TTS (same as run_ws) ────────────────────────
+        async def _on_transcription(text: str, language: str | None) -> None:
+            if not language or state.detected_language == language:
+                return
+            state.detected_language = language
+            log.info("twilio_language_detected", session_id=session_id, language=language)
+            if state.tts_processor is not None:
+                voice = LANGUAGE_VOICE_MAP.get(language, config.tts_voice)
+                state.tts_processor.set_voice(voice, language)
+
+        # ── Call recorder ─────────────────────────────────────────────────
+        recorder = None
+        try:
+            recorder = CallRecorder(
+                session_id=session_id,
+                call_id=state.info.call_id,
+                organization_id=str(config.organization_id),
+            )
+            await recorder.start()
+            state.recorder = recorder
+        except Exception as exc:
+            log.warning("twilio_call_recorder_start_failed", session_id=session_id, error=str(exc))
+
+        # ── Build pipeline ─────────────────────────────────────────────────
+        builder  = PipelineBuilder(config)
+        pipeline = await builder.build_for_twilio(
+            transport, on_transcription=_on_transcription, recorder=recorder
+        )
+        state.tts_processor = builder.tts_processor
+
+        # ── Run pipeline ───────────────────────────────────────────────────
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(allow_interruptions=config.allow_interruptions),
+            enable_rtvi=False,
+        )
+        runner = PipelineRunner()
+        pipeline_task = asyncio.create_task(
+            runner.run(task), name=f"twilio_pipeline_{session_id}"
+        )
+        state.task = pipeline_task
+        log.info("twilio_pipeline_started", session_id=session_id)
+
+        e2e_start = time.perf_counter()
+        try:
+            await pipeline_task
+        except asyncio.CancelledError:
+            log.info("twilio_pipeline_cancelled", session_id=session_id)
+        except Exception as exc:
+            log.error(
+                "twilio_pipeline_error",
+                session_id=session_id,
+                error=str(exc),
+                exc_info=True,
+            )
+        finally:
+            # Cancel reader if still running
+            if not reader_task.done():
+                reader_task.cancel()
+                try:
+                    await reader_task
+                except asyncio.CancelledError:
+                    pass
+
+            e2e_ms = (time.perf_counter() - e2e_start) * 1000
+            _m = get_metrics()
+            if _m is not None:
+                _m.record_e2e_ms(e2e_ms)
+            state.info.status = "ended"
+            if recorder:
+                try:
+                    await recorder.finish()
+                except Exception as exc:
+                    log.warning(
+                        "twilio_recorder_finish_failed",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            log.info("twilio_pipeline_loop_done", session_id=session_id)

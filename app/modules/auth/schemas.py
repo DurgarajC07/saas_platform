@@ -77,6 +77,17 @@ class TokenResponse(CamelModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds until access token expiry
+    org_id: UUID | None = None  # primary org embedded in the JWT; None for users with no org
+
+
+class UpdateProfileRequest(CamelModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=150)
+    last_name: str | None = Field(default=None, min_length=1, max_length=150)
+    display_name: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    avatar_url: str | None = Field(default=None, max_length=1024)
+    timezone: str | None = Field(default=None, max_length=100)
+    locale: str | None = Field(default=None, max_length=20)
 
 
 class UserResponse(CamelModel):
@@ -113,6 +124,12 @@ class OAuthRedirectResponse(CamelModel):
 
     authorization_url: str
     state: str
+
+
+class OAuthProvidersResponse(CamelModel):
+    """Returned from GET /oauth/providers — lists configured providers."""
+
+    providers: list[str]  # e.g. ["google", "github"]
 
 
 # ── Two-Factor Authentication (TOTP) ──────────────────────────────────────

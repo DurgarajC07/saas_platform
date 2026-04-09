@@ -112,6 +112,61 @@ class Settings(BaseSettings):
     # Base URL used to build OAuth2 redirect URIs (e.g. https://api.example.com)
     OAUTH_REDIRECT_BASE_URL: str = "http://localhost:8000"
 
+    # ── Qdrant / RAG ───────────────────────────────────────────────────────
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""       # leave blank for local / single-node
+    RAG_EMBED_MODEL: str = "BAAI/bge-small-en-v1.5"   # 384-dim, ~130 MB
+    RAG_CHUNK_SIZE: int = 512      # approximate token budget per chunk
+    RAG_CHUNK_OVERLAP: int = 50    # overlap between consecutive chunks
+    RAG_SCORE_THRESHOLD: float = 0.6
+    RAG_DEFAULT_TOP_K: int = 3
+
+    # ── Pipeline service ───────────────────────────────────────────────────
+    PIPELINE_SERVICE_URL: str = "http://localhost:7000"
+
+    # ── Twilio PSTN ────────────────────────────────────────────────────────
+    # Get these from https://console.twilio.com → Account Info
+    TWILIO_ACCOUNT_SID: str = ""          # AC…
+    TWILIO_AUTH_TOKEN: str = ""           # used for signature validation & REST API
+    # Your publicly reachable hostname (no scheme, no trailing slash)
+    # e.g. "api.example.com" or for local dev: use ngrok subdomain
+    PUBLIC_HOST: str = "localhost:8000"
+    PUBLIC_PROTOCOL: str = "https"        # http for local dev with ngrok http tunnels
+    # Internal WS base URL the saas_platform passes to the pipeline service
+    # when creating Twilio sessions so Twilio can reach the stream endpoint
+    PIPELINE_WS_PUBLIC_URL: str = "ws://localhost:7000"  # override with public wss:// in prod
+
+    # ── WebRTC / ICE ───────────────────────────────────────────────────────
+    # ICE_SERVERS: comma-separated STUN/TURN URLs served to browser clients.
+    # For production add a TURN entry:  turn:your-turn.server:3478
+    ICE_SERVERS: str = "stun:stun.l.google.com:19302"
+
+    # Optional TURN credentials (only needed when ICE_SERVERS contains TURN)
+    TURN_SERVER_URL: str = ""      # e.g. turn:coturn.example.com:3478
+    TURN_USERNAME: str = ""
+    TURN_CREDENTIAL: str = ""
+
+    @property
+    def ice_server_list(self) -> list[dict]:
+        """
+        Return a JSON-serialisable ICE server list for the browser SDK.
+
+        STUN entries are plain ``{"urls": "stun:..."}`` dicts.
+        If ``TURN_SERVER_URL`` is set a TURN entry with credentials is appended.
+        """
+        servers = [
+            {"urls": url.strip()}
+            for url in self.ICE_SERVERS.split(",")
+            if url.strip()
+        ]
+        if self.TURN_SERVER_URL:
+            servers.append({
+                "urls": self.TURN_SERVER_URL,
+                "username": self.TURN_USERNAME,
+                "credential": self.TURN_CREDENTIAL,
+            })
+        return servers
+
     # ── Helpers ────────────────────────────────────────────────────────────
     @property
     def is_production(self) -> bool:

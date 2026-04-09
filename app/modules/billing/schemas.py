@@ -182,3 +182,34 @@ class PaymentMethodListResponse(CamelModel):
 
 class WebhookAckResponse(CamelModel):
     received: bool = True
+
+
+# ── Usage & invoice preview ───────────────────────────────────────────────
+
+class BillingUsageResponse(CamelModel):
+    """Current-month call-minute consumption for an org."""
+    org_id: UUID
+    period: str                      # YYYY-MM
+    used_seconds: int
+    used_minutes: int
+    allowed_minutes: int | None      # None == unlimited
+    remaining_minutes: int | None    # None == unlimited
+    credit_balance: int              # Redis monthly credit counter
+    plan_name: str
+
+
+class InvoiceLineItem(CamelModel):
+    description: str
+    quantity: float
+    unit_price: float                # USD per unit
+    amount: float                    # quantity * unit_price
+
+
+class InvoicePreviewResponse(CamelModel):
+    """Estimated invoice for the current billing period."""
+    org_id: UUID
+    period: str                      # YYYY-MM
+    line_items: list[InvoiceLineItem]
+    subtotal: float
+    currency: str
+    estimated_at: datetime

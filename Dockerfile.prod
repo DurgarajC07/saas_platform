@@ -1,0 +1,126 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# voice_saas — Production Docker Image
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Two-stage build:
+#   builder  — installs Python deps via uv into an isolated .venv
+#   runtime  — minimal image; only the venv + app source is copied over
+#
+# Services exposed by this image
+# ───────────────────────────────
+#   8000  Main API  (gunicorn + UvicornWorker)
+#         gunicorn app.main:app \
+#             -k uvicorn.workers.UvicornWorker \
+#             -w 4 --bind 0.0.0.0:8000
+#
+#   8001  Pipeline service  (run separately via docker-compose or K8s sidecar)
+#         python -m services.pipeline.server
+#
+# Build
+# ─────
+#   docker build -f Dockerfile.prod -t voice-saas:prod .
+#
+# Run (API only)
+# ─────────────
+#   docker run --env-file .env -p 8000:8000 voice-saas:prod
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Stage 1: dependency builder ──────────────────────────────────────────────
+FROM python:3.14-slim AS builder
+
+# Pull a pinned uv binary directly from the official image so we don't need
+# to install it via pip (keeps the build cache clean and reproducible).
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    # Compile .pyc files at install time for faster container startup
+    UV_COMPILE_BYTECODE=1 \
+    # Use hard-links instead of symlinking .venv into uv's cache
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+# Install system build-time deps required by compiled Python extensions:
+#   libpq-dev     — asyncpg / psycopg PostgreSQL adapter
+#   libsndfile1   — pydub / librosa audio processing
+#   build-essential, libffi-dev — cryptography, cffi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    libsndfile1-dev \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Sync only production deps (skip dev/test extras) into an isolated venv.
+# Copying lockfile + pyproject.toml first maximises Docker layer cache hits.
+COPY pyproject.toml uv.lock* ./
+RUN uv sync --frozen --no-dev --no-editable
+
+# ── Stage 2: lean runtime image ──────────────────────────────────────────────
+FROM python:3.14-slim AS runtime
+
+LABEL org.opencontainers.image.title="voice-saas" \
+      org.opencontainers.image.description="AI voice agent SaaS platform" \
+      org.opencontainers.image.source="https://github.com/DurgarajC07/saas_platform"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    # Prepend venv bin so all python commands use the installed packages
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+# Runtime system libraries:
+#   libpq5        — asyncpg / psycopg runtime (no -dev headers needed)
+#   libmagic1     — python-magic MIME detection
+#   libsndfile1   — audio I/O (pydub, soundfile, librosa)
+#   ffmpeg        — audio codec transcoding for Twilio μ-law ↔ PCM
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    libmagic1 \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the pre-built virtual environment from the builder stage.
+# This is the only Python dependency artefact we need in the runtime image —
+# no uv, no pip, no wheel cache.
+COPY --from=builder /app/.venv /app/.venv
+
+# Copy application code (only what the process needs)
+COPY alembic.ini  ./
+COPY alembic/     alembic/
+COPY app/         app/
+COPY scripts/     scripts/
+
+# Create a non-root user for security hardening
+RUN addgroup --system --gid 1001 appgroup \
+    && adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser \
+    && chown -R appuser:appgroup /app
+
+USER appuser
+
+# ── Ports ─────────────────────────────────────────────────────────────────────
+EXPOSE 8000
+# EXPOSE 8001  — pipeline service (run in a separate container / sidecar)
+
+# ── Health check ─────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
+    || exit 1
+
+# ── Default command: API server ───────────────────────────────────────────────
+# -w 2  → 2 gunicorn workers; tune to (2 × CPU_cores + 1) in production
+# Swap CMD to run the pipeline service:
+#   python -m services.pipeline.server
+CMD ["gunicorn", "app.main:app", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "-w", "2", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "120", \
+     "--graceful-timeout", "30", \
+     "--keep-alive", "5", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "--log-level", "info"]
