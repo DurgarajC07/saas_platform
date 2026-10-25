@@ -2,9 +2,14 @@
  * OAuthCallbackPage — landing page for /oauth/callback
  *
  * The backend redirects here after a successful OAuth2 login:
- *   FRONTEND_URL/oauth/callback?accessToken=…&refreshToken=…&tokenType=…&expiresIn=…
+ *   FRONTEND_URL/oauth/callback?accessToken=…&tokenType=…&expiresIn=…
  *
- * This page parses those query params, stores the tokens in Zustand,
+ * The refresh token is NOT in this URL — a query string ends up in browser
+ * history and server/proxy access logs, which is worse than localStorage
+ * ever was. It arrives as the same httpOnly refresh_token cookie /login
+ * uses instead (set directly on this redirect response by the backend).
+ *
+ * This page parses the access-token query params, stores it in Zustand,
  * then immediately redirects to the dashboard.
  * If parameters are missing it redirects back to login with an error toast.
  */
@@ -24,17 +29,14 @@ export function OAuthCallbackPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const accessToken = params.get('accessToken')
-    const refreshToken = params.get('refreshToken')
-    const tokenType = params.get('tokenType') ?? 'bearer'
-    const expiresIn = parseInt(params.get('expiresIn') ?? '1800', 10)
 
-    if (!accessToken || !refreshToken) {
+    if (!accessToken) {
       toast.error('OAuth sign-in failed. Please try again.')
       void navigate({ to: '/auth/login' })
       return
     }
 
-    setAuth({ accessToken, refreshToken, tokenType, expiresIn })
+    setAuth({ accessToken })
     void qc.invalidateQueries({ queryKey: queryKeys.auth.me() })
     void navigate({ to: '/dashboard' })
     // intentionally run once on mount

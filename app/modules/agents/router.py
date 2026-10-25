@@ -101,6 +101,15 @@ AgentCreateUser = Annotated[User, require("agents.agent.create")]
 AgentReadUser = Annotated[User, require("agents.agent.read")]
 AgentUpdateUser = Annotated[User, require("agents.agent.update")]
 AgentDeleteUser = Annotated[User, require("agents.agent.delete")]
+AnalyticsReadUser = Annotated[User, require("agents.analytics.read")]
+KbCreateUser = Annotated[User, require("agents.knowledge_base.create")]
+KbListUser = Annotated[User, require("agents.knowledge_base.list")]
+KbDeleteUser = Annotated[User, require("agents.knowledge_base.delete")]
+ToolsManageUser = Annotated[User, require("agents.tools.manage")]
+PhoneCreateUser = Annotated[User, require("agents.phone_number.create")]
+PhoneListUser = Annotated[User, require("agents.phone_number.list")]
+PhoneDeleteUser = Annotated[User, require("agents.phone_number.delete")]
+CallStartUser = Annotated[User, require("agents.call.start")]
 AgentListUser = Annotated[User, require("agents.agent.list")]
 CallLogWriteUser = Annotated[User, require("agents.call_log.create")]
 CallLogReadUser = Annotated[User, require("agents.call_log.read")]
@@ -263,7 +272,7 @@ async def test_call(
 async def webrtc_connect(
     agent_id: UUID,
     body: WebRTCOfferRequest,
-    actor: AgentReadUser,
+    actor: CallStartUser,
     org_id: OrgID,
     db: DB,
     redis: Redis,
@@ -346,7 +355,7 @@ async def update_prompt(
 async def assign_phone_number(
     agent_id: UUID,
     body: AssignPhoneNumberRequest,
-    actor: AgentUpdateUser,
+    actor: PhoneCreateUser,
     org_id: OrgID,
     db: DB,
     _feat: None = require_feature("ai.pstn.enabled"),
@@ -364,7 +373,7 @@ async def assign_phone_number(
 )
 async def list_phone_numbers(
     agent_id: UUID,
-    actor: AgentReadUser,
+    actor: PhoneListUser,
     org_id: OrgID,
     db: DB,
 ) -> list[AgentPhoneNumberResponse]:
@@ -382,7 +391,7 @@ async def list_phone_numbers(
 async def unassign_phone_number(
     agent_id: UUID,
     phone_number_id: UUID,
-    actor: AgentUpdateUser,
+    actor: PhoneDeleteUser,
     org_id: OrgID,
     db: DB,
 ) -> None:
@@ -403,7 +412,7 @@ async def unassign_phone_number(
 )
 async def upload_knowledge_base(
     agent_id: UUID,
-    actor: AgentUpdateUser,
+    actor: KbCreateUser,
     org_id: OrgID,
     db: DB,
     redis: Redis,
@@ -437,7 +446,7 @@ async def upload_knowledge_base(
 )
 async def list_knowledge_base(
     agent_id: UUID,
-    actor: AgentReadUser,
+    actor: KbListUser,
     org_id: OrgID,
     db: DB,
     kb_status: str | None = Query(default=None, alias="status"),
@@ -460,7 +469,7 @@ async def list_knowledge_base(
 async def delete_kb_document(
     agent_id: UUID,
     doc_id: UUID,
-    actor: AgentUpdateUser,
+    actor: KbDeleteUser,
     org_id: OrgID,
     db: DB,
     _feat: None = require_feature("ai.rag.enabled"),
@@ -483,7 +492,7 @@ async def delete_kb_document(
 )
 async def clear_knowledge_base(
     agent_id: UUID,
-    actor: AgentUpdateUser,
+    actor: KbDeleteUser,
     org_id: OrgID,
     db: DB,
     _feat: None = require_feature("ai.rag.enabled"),
@@ -508,7 +517,7 @@ async def clear_knowledge_base(
 async def update_tools(
     agent_id: UUID,
     body: UpdateToolsRequest,
-    actor: AgentUpdateUser,
+    actor: ToolsManageUser,
     org_id: OrgID,
     db: DB,
     _feat: None = require_feature("ai.tools.enabled"),
@@ -601,7 +610,7 @@ async def list_agent_calls(
 )
 async def agent_analytics(
     agent_id: UUID,
-    actor: AgentReadUser,
+    actor: AnalyticsReadUser,
     org_id: OrgID,
     db: DB,
     days: int = Query(default=30, ge=1, le=365),
@@ -854,7 +863,7 @@ async def twilio_connect_callback(
 async def start_outbound_call(
     agent_id: UUID,
     body: OutboundCallRequest,
-    actor: Annotated[User, require("agents.agent.read")],
+    actor: CallStartUser,
     org_id: OrgID,
     db: DB,
     redis: Redis,

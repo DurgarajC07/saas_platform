@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { useForm, Controller } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
+import { useEffect, useRef, useState } from 'react'
+import { loadStripe } from '@stripe/stripe-js'
+import type { Stripe, StripeCardElement, StripeElements } from '@stripe/stripe-js'
 import { CreditCardIcon, PlusIcon } from 'lucide-react'
 
 import { PageContainer } from '@/shared/components/layout/PageContainer'
@@ -8,7 +8,6 @@ import { PageHeader } from '@/shared/components/layout/PageHeader'
 import { Button } from '@/shared/components/ui/button'
 import { Card, CardContent } from '@/shared/components/ui/card'
 import { Badge } from '@/shared/components/ui/badge'
-import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { Switch } from '@/shared/components/ui/switch'
 import { Skeleton } from '@/shared/components/ui/skeleton'
@@ -20,41 +19,126 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/shared/components/ui/dialog'
+import { STRIPE_PUBLISHABLE_KEY } from '@/shared/lib/constants'
 
-import {
-  usePaymentMethods,
-  useAddPaymentMethod,
-  useSetDefaultPaymentMethod,
-} from '@/features/billing/hooks'
-import { addPaymentMethodSchema, type AddPaymentMethodInput } from '@/features/billing/schemas'
+import { usePaymentMethods, useAddPaymentMethod, useSetDefaultPaymentMethod } from '@/features/billing/hooks'
+
+// Loaded once per page module — loadStripe() memoizes internally, but keep a single
+// promise around so remounting the dialog doesn't re-trigger script injection.
+const stripePromise = STRIPE_PUBLISHABLE_KEY ? loadStripe(STRIPE_PUBLISHABLE_KEY) : null
 
 export function PaymentMethodsPage() {
   const { data, isLoading } = usePaymentMethods()
   const addPaymentMethod = useAddPaymentMethod()
   const setDefault = useSetDefaultPaymentMethod()
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [setAsDefault, setSetAsDefault] = useState(false)
+  const [cardError, setCardError] = useState<string | null>(null)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const [cardElementReady, setCardElementReady] = useState(false)
 
-  const form = useForm<AddPaymentMethodInput>({
-    resolver: zodResolver(addPaymentMethodSchema),
-    defaultValues: {
-      externalPaymentMethodId: '',
-      type: 'card',
-      cardBrand: '',
-      lastFour: '',
-      setAsDefault: false,
-    },
-  })
+  const cardMountRef = useRef<HTMLDivElement>(null)
+  const stripeRef = useRef<Stripe | null>(null)
+  const elementsRef = useRef<StripeElements | null>(null)
+  const cardElementRef = useRef<StripeCardElement | null>(null)
 
   const paymentMethods = data?.paymentMethods ?? []
 
-  function handleSubmit(values: AddPaymentMethodInput) {
-    addPaymentMethod.mutate(values, {
-      onSuccess: () => {
-        setDialogOpen(false)
-        form.reset()
-      },
+  // Mount the Stripe Elements card input whenever the dialog opens.
+  useEffect(() => {
+    if (!dialogOpen || !stripePromise) {
+      return
+    }
+
+    let unmounted = false
+
+    void stripePromise.then((stripe) => {
+      if (!stripe || unmounted || !cardMountRef.current) {
+        return
+      }
+      stripeRef.current = stripe
+      const elements = stripe.elements()
+      elementsRef.current = elements
+
+      const cardElement = elements.create('card', {
+        style: {
+          base: {
+            fontSize: '14px',
+            color: 'hsl(var(--foreground))',
+            '::placeholder': { color: 'hsl(var(--muted-foreground))' },
+          },
+          invalid: {
+            color: 'hsl(var(--destructive))',
+          },
+        },
+      })
+      cardElement.mount(cardMountRef.current)
+      cardElement.on('change', (event) => {
+        setCardError(event.error?.message ?? null)
+      })
+      cardElement.on('ready', () => {
+        setCardElementReady(true)
+      })
+      cardElementRef.current = cardElement
     })
+
+    return () => {
+      unmounted = true
+      setCardElementReady(false)
+      cardElementRef.current?.unmount()
+      cardElementRef.current?.destroy()
+      cardElementRef.current = null
+      elementsRef.current = null
+    }
+  }, [dialogOpen])
+
+  async function handleSubmit() {
+    setSubmitError(null)
+
+    const stripe = stripeRef.current
+    const cardElement = cardElementRef.current
+    if (!stripe || !cardElement) {
+      setSubmitError('Payment collection is not ready yet. Please try again in a moment.')
+      return
+    }
+
+    const result = await stripe.createPaymentMethod({
+      type: 'card',
+      card: cardElement,
+    })
+
+    if (result.error) {
+      setSubmitError(result.error.message ?? 'Could not process this card. Please check the details.')
+      return
+    }
+
+    const pm = result.paymentMethod
+    addPaymentMethod.mutate(
+      {
+        externalPaymentMethodId: pm.id,
+        type: 'card',
+        provider: 'stripe',
+        cardBrand: pm.card?.brand ?? undefined,
+        lastFour: pm.card?.last4 ?? undefined,
+        expiresMonth: pm.card?.exp_month,
+        expiresYear: pm.card?.exp_year,
+        setAsDefault,
+      },
+      {
+        onSuccess: () => {
+          setDialogOpen(false)
+          setSetAsDefault(false)
+          setSubmitError(null)
+          cardElementRef.current?.clear()
+        },
+        onError: (err) => {
+          setSubmitError(err instanceof Error ? err.message : 'Failed to save payment method.')
+        },
+      },
+    )
   }
+
+  const stripeConfigured = Boolean(STRIPE_PUBLISHABLE_KEY)
 
   return (
     <PageContainer>
@@ -130,121 +214,72 @@ export function PaymentMethodsPage() {
         )}
       </div>
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(open) => {
+          setDialogOpen(open)
+          if (!open) {
+            setCardError(null)
+            setSubmitError(null)
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add payment method</DialogTitle>
           </DialogHeader>
 
-          {/* Real tokenized card collection (e.g. Stripe Elements) isn't wired up yet — this attaches an already-tokenized/provider payment-method id. */}
-          <form
-            onSubmit={(e) => {
-              void form.handleSubmit(handleSubmit)(e)
-            }}
-            className="space-y-4"
-          >
-            <div className="space-y-2">
-              <Label htmlFor="externalPaymentMethodId">
-                Provider payment-method id <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="externalPaymentMethodId"
-                placeholder="pm_1234567890"
-                {...form.register('externalPaymentMethodId')}
-              />
-              {form.formState.errors.externalPaymentMethodId && (
-                <p className="text-destructive text-sm">
-                  {form.formState.errors.externalPaymentMethodId.message}
-                </p>
-              )}
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
+          {!stripeConfigured ? (
+            <p className="text-destructive text-sm">
+              Payment collection is not configured — contact support.
+            </p>
+          ) : (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                void handleSubmit()
+              }}
+              className="space-y-4"
+            >
               <div className="space-y-2">
-                <Label htmlFor="cardBrand">Card brand</Label>
-                <Input id="cardBrand" placeholder="Visa" {...form.register('cardBrand')} />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="lastFour">Last 4 digits</Label>
-                <Input
-                  id="lastFour"
-                  placeholder="4242"
-                  maxLength={4}
-                  {...form.register('lastFour')}
+                <Label htmlFor="card-element">
+                  Card details <span className="text-destructive">*</span>
+                </Label>
+                <div
+                  id="card-element"
+                  ref={cardMountRef}
+                  className="border-input min-h-[38px] rounded-md border px-3 py-2.5"
                 />
-                {form.formState.errors.lastFour && (
-                  <p className="text-destructive text-sm">
-                    {form.formState.errors.lastFour.message}
-                  </p>
-                )}
+                {cardError && <p className="text-destructive text-sm">{cardError}</p>}
+                {submitError && <p className="text-destructive text-sm">{submitError}</p>}
               </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="expiresMonth">Expiry month</Label>
-                <Input
-                  id="expiresMonth"
-                  type="number"
-                  min={1}
-                  max={12}
-                  placeholder="12"
-                  {...form.register('expiresMonth')}
-                />
-                {form.formState.errors.expiresMonth && (
-                  <p className="text-destructive text-sm">
-                    {form.formState.errors.expiresMonth.message}
+              <div className="flex items-center justify-between rounded-lg border p-4">
+                <div>
+                  <p className="font-medium">Set as default</p>
+                  <p className="text-muted-foreground text-sm">
+                    Use this payment method for future charges.
                   </p>
-                )}
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="expiresYear">Expiry year</Label>
-                <Input
-                  id="expiresYear"
-                  type="number"
-                  min={2024}
-                  placeholder="2030"
-                  {...form.register('expiresYear')}
-                />
-                {form.formState.errors.expiresYear && (
-                  <p className="text-destructive text-sm">
-                    {form.formState.errors.expiresYear.message}
-                  </p>
-                )}
-              </div>
-            </div>
-
-            <Controller
-              control={form.control}
-              name="setAsDefault"
-              render={({ field }) => (
-                <div className="flex items-center justify-between rounded-lg border p-4">
-                  <div>
-                    <p className="font-medium">Set as default</p>
-                    <p className="text-muted-foreground text-sm">
-                      Use this payment method for future charges.
-                    </p>
-                  </div>
-                  <Switch checked={field.value} onCheckedChange={field.onChange} />
                 </div>
-              )}
-            />
+                <Switch checked={setAsDefault} onCheckedChange={setSetAsDefault} />
+              </div>
 
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setDialogOpen(false)
-                }}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" disabled={addPaymentMethod.isPending}>
-                {addPaymentMethod.isPending ? 'Adding…' : 'Add payment method'}
-              </Button>
-            </DialogFooter>
-          </form>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setDialogOpen(false)
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={addPaymentMethod.isPending || !cardElementReady}>
+                  {addPaymentMethod.isPending ? 'Adding…' : 'Add payment method'}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
         </DialogContent>
       </Dialog>
     </PageContainer>

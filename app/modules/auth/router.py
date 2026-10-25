@@ -33,10 +33,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
 
 from app.core.rate_limit import (
     ForgotPasswordLimit,
@@ -79,6 +81,43 @@ from app.modules.auth.schemas import (
 from app.modules.auth.service import AuthService
 
 router = APIRouter()
+
+_REFRESH_COOKIE_NAME = "refresh_token"
+_REFRESH_COOKIE_PATH = "/api/v1/auth"
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    """
+    Carry the refresh token to the browser as an httpOnly cookie instead of
+    (only) the response body, so a frontend that stops persisting it to
+    localStorage/JS-readable storage still gets silent token refresh.
+
+    The response body still includes ``refresh_token`` too (unchanged) —
+    non-browser API clients that store it themselves keep working exactly
+    as before; this is additive, not a breaking change to the API contract.
+    Scoped to ``/api/v1/auth`` (the only paths that ever need to read it)
+    rather than the whole site.
+    """
+    settings = get_settings()
+    response.set_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        value=refresh_token,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path=_REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="lax",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    settings = get_settings()
+    response.delete_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        path=_REFRESH_COOKIE_PATH,
+        secure=settings.is_production,
+        samesite="lax",
+    )
 
 
 # ── Register ───────────────────────────────────────────────────────────────
@@ -134,6 +173,7 @@ async def verify_email(
 async def login(
     data: LoginRequest,
     request: Request,
+    response: Response,
     deps: Annotated[AuthDeps, Depends()],
 ) -> TokenResponse | TwoFactorChallengeResponse:
     """
@@ -146,7 +186,9 @@ async def login(
     user_agent = request.headers.get("User-Agent", "")
     service = AuthService(deps.db, deps.redis)
     try:
-        return await service.login(data, ip, user_agent)
+        result = await service.login(data, ip, user_agent)
+        _set_refresh_cookie(response, result.refresh_token)
+        return result
     except TwoFactorRequiredException as exc:
         return TwoFactorChallengeResponse(user_id=exc.user_id)
 
@@ -161,6 +203,7 @@ async def login(
 async def login_form(
     form: Annotated[OAuth2PasswordRequestForm, Depends()],
     request: Request,
+    response: Response,
     deps: Annotated[AuthDeps, Depends()],
 ) -> TokenResponse:
     """Adapter that maps OAuth2PasswordRequestForm to LoginRequest."""
@@ -169,7 +212,9 @@ async def login_form(
     user_agent = request.headers.get("User-Agent", "")
     service = AuthService(deps.db, deps.redis)
     try:
-        return await service.login(data, ip, user_agent)
+        result = await service.login(data, ip, user_agent)
+        _set_refresh_cookie(response, result.refresh_token)
+        return result
     except TwoFactorRequiredException:
         from app.core.exceptions import ForbiddenException
         raise ForbiddenException("2FA is required — use the /login endpoint")
@@ -186,16 +231,33 @@ async def login_form(
 async def refresh(
     data: RefreshRequest,
     request: Request,
+    response: Response,
     deps: Annotated[AuthDeps, Depends()],
 ) -> TokenResponse:
     """
     Exchange a valid refresh token for a new access + refresh token pair.
     The old refresh token is immediately denylisted (rotation).
+
+    The token is taken from the request body if present (non-browser API
+    clients), otherwise from the httpOnly ``refresh_token`` cookie set by
+    ``/login`` (browser clients, which no longer send it in the body at
+    all). Either way the rotated token is written back to both the body
+    and the cookie.
     """
+    from app.core.exceptions import UnauthorizedException
+
+    token = data.refresh_token or request.cookies.get(_REFRESH_COOKIE_NAME)
+    if not token:
+        raise UnauthorizedException("Refresh token missing")
+
     ip = request.client.host if request.client else None
     user_agent = request.headers.get("User-Agent", "")
     service = AuthService(deps.db, deps.redis)
-    return await service.refresh_tokens(data, ip=ip, user_agent=user_agent)
+    result = await service.refresh_tokens(
+        RefreshRequest(refresh_token=token), ip=ip, user_agent=user_agent
+    )
+    _set_refresh_cookie(response, result.refresh_token)
+    return result
 
 
 # ── Logout ─────────────────────────────────────────────────────────────────
@@ -207,6 +269,8 @@ async def refresh(
 )
 async def logout(
     data: LogoutRequest,
+    request: Request,
+    response: Response,
     access_token: Annotated[str, Depends(oauth2_scheme)],
     _current_user: Annotated[User, Depends(get_current_user)],  # validates token first
     deps: Annotated[AuthDeps, Depends()],
@@ -214,10 +278,14 @@ async def logout(
     """
     Denylist the current access token and (optionally) the refresh token.
     The access token is extracted from the Authorization header automatically.
-    Pass the refresh token in the request body to revoke it in the same call.
+    Pass the refresh token in the request body to revoke it in the same call,
+    or it's read from the httpOnly cookie if the body omits it. The cookie
+    is cleared either way.
     """
+    refresh_token = data.refresh_token or request.cookies.get(_REFRESH_COOKIE_NAME)
     service = AuthService(deps.db, deps.redis)
-    await service.logout(access_token, data.refresh_token)
+    await service.logout(access_token, refresh_token)
+    _clear_refresh_cookie(response)
 
 
 # ── Forgot Password ────────────────────────────────────────────────────────
@@ -342,9 +410,15 @@ async def oauth_callback(
 ) -> RedirectResponse:
     """
     Receive the OAuth2 authorization code, exchange it for tokens,
-    upsert the user account, and redirect to the frontend with JWT tokens.
+    upsert the user account, and redirect to the frontend with the access
+    token.
 
-    Redirect target: FRONTEND_URL/oauth/callback?accessToken=…&refreshToken=…
+    Redirect target: FRONTEND_URL/oauth/callback?accessToken=…&tokenType=…&expiresIn=…
+
+    The refresh token is deliberately NOT put in this URL — a query string
+    ends up in browser history and in any server/proxy access log it
+    passes through, which is a worse exposure than localStorage ever was.
+    It's set as the same httpOnly cookie ``/login`` uses instead.
     """
     from app.config import get_settings
     from app.modules.auth.oauth_service import OAuthService
@@ -358,11 +432,12 @@ async def oauth_callback(
     redirect_to = (
         f"{frontend_url}/oauth/callback"
         f"?accessToken={tokens.access_token}"
-        f"&refreshToken={tokens.refresh_token}"
         f"&tokenType={tokens.token_type}"
         f"&expiresIn={tokens.expires_in}"
     )
-    return RedirectResponse(url=redirect_to, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(url=redirect_to, status_code=status.HTTP_302_FOUND)
+    _set_refresh_cookie(response, tokens.refresh_token)
+    return response
 
 
 # ── Two-Factor Authentication (TOTP) ──────────────────────────────────────
@@ -438,6 +513,7 @@ async def disable_2fa(
 async def verify_2fa(
     data: Verify2FARequest,
     request: Request,
+    response: Response,
     deps: Annotated[AuthDeps, Depends()],
 ) -> TokenResponse:
     """
@@ -450,7 +526,9 @@ async def verify_2fa(
     ip = request.client.host if request.client else None
     user_agent = request.headers.get("User-Agent", "")
     service = TwoFactorService(deps.db, deps.redis)
-    return await service.complete_2fa_login(data.user_id, data.code, ip, user_agent)
+    result = await service.complete_2fa_login(data.user_id, data.code, ip, user_agent)
+    _set_refresh_cookie(response, result.refresh_token)
+    return result
 
 
 @router.post(
@@ -461,6 +539,7 @@ async def verify_2fa(
 async def use_backup_code(
     data: BackupCodeRequest,
     request: Request,
+    response: Response,
     deps: Annotated[AuthDeps, Depends()],
 ) -> TokenResponse:
     """
@@ -472,7 +551,9 @@ async def use_backup_code(
     ip = request.client.host if request.client else None
     user_agent = request.headers.get("User-Agent", "")
     service = TwoFactorService(deps.db, deps.redis)
-    return await service.use_backup_code(data.user_id, data.code, ip, user_agent)
+    result = await service.use_backup_code(data.user_id, data.code, ip, user_agent)
+    _set_refresh_cookie(response, result.refresh_token)
+    return result
 
 
 # ── Session Management ─────────────────────────────────────────────────────

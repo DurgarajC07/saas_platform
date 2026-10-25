@@ -4,6 +4,10 @@ export const APP_VERSION = (import.meta.env.VITE_APP_VERSION as string | undefin
 // API
 export const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '/api/v1'
 
+// Stripe (client-side tokenization only)
+export const STRIPE_PUBLISHABLE_KEY =
+  (import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string | undefined) ?? ''
+
 // Pagination
 export const DEFAULT_PAGE_SIZE = 20
 export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100]

@@ -66,12 +66,12 @@ export function useRegister() {
 
 // ─── useLogout ───────────────────────────────────────────────────────────────
 export function useLogout() {
-  const { logout, refreshToken } = useAuthStore()
+  const { logout } = useAuthStore()
   const navigate = useNavigate()
   const qc = useQueryClient()
 
   return useMutation({
-    mutationFn: () => authApi.logout(refreshToken),
+    mutationFn: () => authApi.logout(),
     onSettled: () => {
       logout()
       qc.clear()

@@ -43,15 +43,15 @@ export const authApi = {
     return data
   },
 
-  /** POST /auth/refresh */
-  refresh: async (refreshToken: string): Promise<TokenResponse> => {
-    const { data } = await apiClient.post<TokenResponse>('/auth/refresh', { refreshToken })
+  /** POST /auth/refresh — refresh token comes from the httpOnly cookie, not the body */
+  refresh: async (): Promise<TokenResponse> => {
+    const { data } = await apiClient.post<TokenResponse>('/auth/refresh', {})
     return data
   },
 
-  /** POST /auth/logout — optionally revoke refresh token too */
-  logout: async (refreshToken?: string | null): Promise<void> => {
-    await apiClient.post('/auth/logout', { refreshToken: refreshToken ?? null })
+  /** POST /auth/logout — the httpOnly refresh_token cookie is revoked server-side too */
+  logout: async (): Promise<void> => {
+    await apiClient.post('/auth/logout', {})
   },
 
   /** GET /auth/me */

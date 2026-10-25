@@ -11,6 +11,9 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  // Required so the browser sends/receives the httpOnly refresh_token
+  // cookie the backend sets on /login, /refresh, etc.
+  withCredentials: true,
 })
 
 // ── Request interceptor: inject Authorization + org-context headers ─────────
@@ -60,14 +63,15 @@ apiClient.interceptors.response.use(
 )
 
 async function doRefresh(): Promise<string> {
-  const refreshToken = useAuthStore.getState().refreshToken
-  if (!refreshToken) return Promise.reject(new Error('No refresh token'))
-
-  const { data } = await axios.post<{ accessToken: string; refreshToken: string }>(
+  // No refresh token to send from JS anymore — the httpOnly refresh_token
+  // cookie carries it. withCredentials is required here too since this
+  // uses a bare axios call, not the apiClient instance.
+  const { data } = await axios.post<{ accessToken: string }>(
     `${(import.meta.env.VITE_API_URL as string | undefined) ?? '/api/v1'}/auth/refresh`,
-    { refreshToken },
+    {},
+    { withCredentials: true },
   )
-  useAuthStore.getState().setTokens(data.accessToken, data.refreshToken)
+  useAuthStore.getState().setToken(data.accessToken)
   return data.accessToken
 }
 

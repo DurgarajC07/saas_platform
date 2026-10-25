@@ -45,7 +45,15 @@ class LogoutRequest(CamelModel):
 
 
 class RefreshRequest(CamelModel):
-    refresh_token: str
+    """
+    ``refresh_token`` is optional in the body: browser clients now rely on
+    the httpOnly ``refresh_token`` cookie set by ``/login``/``/refresh``
+    instead of sending the token in JS-readable storage (see
+    ``app/modules/auth/router.py::refresh`` for the cookie-vs-body
+    resolution). Non-browser API clients may still pass it explicitly.
+    """
+
+    refresh_token: str | None = None
 
 
 class ForgotPasswordRequest(CamelModel):

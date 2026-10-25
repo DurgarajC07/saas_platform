@@ -53,7 +53,7 @@ from pipecat.frames.frames import (
     LLMMessagesFrame,
     StartFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 
 from processors.executors import (
     HTTPGetExecutor,
@@ -621,11 +621,33 @@ class TestToolExecutorProcessorFrames:
         assert result_frame.result == {"order_id": "ORD-STR"}
 
     async def test_start_and_end_frames_passed_through(self):
+        """
+        StartFrame triggers pipecat's own internal processor-lifecycle
+        startup (FrameProcessor.__start -> __create_process_task), which —
+        unlike every other frame type sent through this test's shared
+        _send() helper — requires the processor to have gone through
+        setup() with a real TaskManager first, exactly as a Pipeline would
+        do when wiring processors together. Every other test in this file
+        sends non-lifecycle frames and never touches this path, so this
+        setup is scoped to just this test rather than the shared helper.
+        """
+        import asyncio
+
+        from pipecat.clocks.system_clock import SystemClock
+        from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
+
+        task_manager = TaskManager()
+        task_manager.setup(TaskManagerParams(loop=asyncio.get_event_loop()))
+
         proc = ToolExecutorProcessor(tools_spec=None, org_secrets={})
-        emitted = await _send(proc, [StartFrame(), EndFrame()])
-        types = [type(f) for f in emitted]
-        assert StartFrame in types
-        assert EndFrame in types
+        await proc.setup(FrameProcessorSetup(clock=SystemClock(), task_manager=task_manager))
+        try:
+            emitted = await _send(proc, [StartFrame(), EndFrame()])
+            types = [type(f) for f in emitted]
+            assert StartFrame in types
+            assert EndFrame in types
+        finally:
+            await proc.cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

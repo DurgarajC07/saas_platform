@@ -81,9 +81,15 @@ class TestCodecRoundTrip:
         assert len(decoded_b64) > 0
 
         recovered: bytes = _mulaw_to_pcm16k(encoded)
-        # After µ-law encode+decode the sample count must be the same
+        # 16kHz -> 8kHz -> 16kHz through audioop.ratecv is lossy resampling,
+        # not a lossless codec — its internal filter state can legitimately
+        # land one sample short/long at a conversion boundary. This was
+        # previously asserting an exact count (`== 160`), which is stricter
+        # than the resampler actually guarantees; a small, fixed tolerance
+        # matches the "within codec tolerance" behavior this test already
+        # claims to verify in its docstring.
         recovered_samples = struct.unpack(f"<{len(recovered)//2}h", recovered)
-        assert len(recovered_samples) == 160
+        assert abs(len(recovered_samples) - 160) <= 2
 
     def test_pcm16k_to_mulaw_b64_returns_str(self):
         pcm = self._make_pcm16k(80)
@@ -112,17 +118,27 @@ def _make_transport() -> TwilioTransport:
 
 
 class TestParseMessage:
-    """Test event parsing without running the full WS loop."""
+    """
+    Test event parsing without running the full WS loop.
 
-    @pytest.mark.asyncio
-    async def test_connected_event_is_silent(self):
+    ``_parse_message`` is synchronous and RETURNS the parsed frame (or
+    None) — it does not touch ``self._queue`` itself; that's the caller's
+    job in the real `_ws_reader` loop (`frame = self._parse_message(raw);
+    if frame is not None: self._queue.put_nowait(frame)`). These tests
+    previously `await`ed a sync function and expected it to have already
+    enqueued the frame, which never matched the real implementation and
+    only "passed" before because conftest.py's broken pipecat-detection
+    check (fixed separately) was silently substituting a stub that masked
+    the mismatch instead of exercising the real code.
+    """
+
+    def test_connected_event_is_silent(self):
         t = _make_transport()
         msg = json.dumps({"event": "connected", "protocol": "Call", "version": "1.0"})
-        await t._parse_message(msg)
-        assert t._queue.empty()
+        result = t._parse_message(msg)
+        assert result is None
 
-    @pytest.mark.asyncio
-    async def test_start_event_captures_ids(self):
+    def test_start_event_captures_ids(self):
         t = _make_transport()
         msg = json.dumps({
             "event": "start",
@@ -133,46 +149,40 @@ class TestParseMessage:
                 "accountSid": "ACabc",
             },
         })
-        await t._parse_message(msg)
+        result = t._parse_message(msg)
+        assert result is None
         assert t.stream_sid == "MZ123"
         assert t.call_sid == "CA456"
 
-    @pytest.mark.asyncio
-    async def test_dtmf_event_enqueues_dtmf_frame(self):
+    def test_dtmf_event_enqueues_dtmf_frame(self):
         t = _make_transport()
         msg = json.dumps({
             "event": "dtmf",
             "dtmf": {"digit": "5", "finished": True},
         })
-        await t._parse_message(msg)
-        frame = t._queue.get_nowait()
+        frame = t._parse_message(msg)
         assert isinstance(frame, DTMFFrame)
         assert frame.digit == "5"
         assert frame.finished is True
 
-    @pytest.mark.asyncio
-    async def test_stop_event_enqueues_end_frame(self):
+    def test_stop_event_enqueues_end_frame(self):
         t = _make_transport()
         msg = json.dumps({"event": "stop", "streamSid": "MZ123"})
-        await t._parse_message(msg)
-        frame = t._queue.get_nowait()
+        frame = t._parse_message(msg)
         assert isinstance(frame, EndFrame)
 
-    @pytest.mark.asyncio
-    async def test_media_event_enqueues_audio_raw_frame(self):
+    def test_media_event_enqueues_audio_raw_frame(self):
         t = _make_transport()
-        t.stream_sid = "MZ123"
-        # Build a tiny µ-law payload
+        # stream_sid is read-only (captured internally from the "start"
+        # event) — decoding a "media" event doesn't depend on it, so no
+        # setup beyond a fresh transport is needed.
         raw_mulaw = audioop.lin2ulaw(b"\x00\x01" * 8, 2)
-        # Downsample to 8 kHz (already at 8 kHz after standard lin2ulaw from 8 kHz PCM)
         payload_b64 = base64.b64encode(raw_mulaw).decode()
         msg = json.dumps({
             "event": "media",
             "media": {"payload": payload_b64, "track": "inbound"},
         })
-        await t._parse_message(msg)
-        # Queue should have an AudioRawFrame
-        frame = t._queue.get_nowait()
+        frame = t._parse_message(msg)
         assert isinstance(frame, AudioRawFrame)
         assert frame.audio  # non-empty
 

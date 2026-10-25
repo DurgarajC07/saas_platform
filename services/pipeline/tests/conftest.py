@@ -30,8 +30,22 @@ def pytest_configure(config: Any) -> None:
 # "from pipecat.xxx import YYY" resolves to our lightweight stubs.
 
 def _stub_pipecat() -> None:
-    if "pipecat" in sys.modules:
-        return  # already installed (e.g. running inside Docker)
+    # `"pipecat" in sys.modules` only tells you whether something in this
+    # process has already *imported* it — not whether it's installed. At
+    # collection time, before any test module has run, that's true even
+    # when the real package is perfectly installed and importable, so this
+    # check always fell through to the stub and silently shadowed a real,
+    # working pipecat-ai install with an incomplete one (missing frame
+    # classes like TTSAudioRawFrame/UserStoppedSpeakingFrame that newer
+    # processor code needs — causing confusing "cannot import name ...
+    # (unknown location)" errors that look like a version mismatch but
+    # aren't). Try the real import first; only stub on genuine ImportError.
+    try:
+        import pipecat.frames.frames  # noqa: F401
+
+        return
+    except ImportError:
+        pass
 
     # ── base Frame ────────────────────────────────────────────────────────────
     @dataclass

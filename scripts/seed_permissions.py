@@ -170,6 +170,7 @@ PERMISSIONS: list[tuple[str, str, str]] = [
     ("agents", "phone_number", "create"),
     ("agents", "phone_number", "read"),
     ("agents", "phone_number", "list"),
+    ("agents", "phone_number", "delete"),
     ("agents", "knowledge_base", "create"),
     ("agents", "knowledge_base", "read"),
     ("agents", "knowledge_base", "list"),
@@ -183,6 +184,7 @@ PERMISSIONS: list[tuple[str, str, str]] = [
     ("agents", "usage", "read"),           # GET  /agents/usage/minutes
     ("agents", "admin", "models"),         # Enterprise: override LLM model config
     ("agents", "call", "export"),          # Export call logs to CSV/JSON
+    ("agents", "call", "start"),           # POST /agents/{id}/calls/outbound
 ]
 
 
