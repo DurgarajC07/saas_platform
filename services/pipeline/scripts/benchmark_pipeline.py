@@ -211,6 +211,10 @@ async def run_single(
 
         ws_connect_url = ws_url
         t_open = time.perf_counter()
+        t_ws_open: float | None = None  # set once the WS handshake completes;
+        # initialised here so a failed connect() still leaves it defined for
+        # the "if t_ws_open and tts_done" check below instead of raising
+        # UnboundLocalError and crashing the whole benchmark run.
 
         try:
             async with websockets.connect(ws_connect_url, open_timeout=10) as ws:

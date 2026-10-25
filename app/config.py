@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     AWS_REGION: str = "us-east-1"
     LOCAL_STORAGE_PATH: str = "/tmp/uploads"
 
+    # ── MinIO (call recordings — written by services/pipeline/call_recorder.py) ──
+    # Mirrors the pipeline service's own env vars so presigned URLs are generated
+    # against the same bucket/endpoint the recording was actually uploaded to.
+    MINIO_ENDPOINT: str = "http://minio:9100"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "call-recordings"
+
     # ── Email (SMTP) ───────────────────────────────────────────────────────
     SMTP_HOST: str = "localhost"
     SMTP_PORT: int = 1025

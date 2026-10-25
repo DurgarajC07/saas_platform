@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from datetime import datetime
 from typing import Annotated, AsyncGenerator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
 
@@ -179,7 +180,7 @@ async def dashboard_agent_performance(
 # ── Agent deep-dive ───────────────────────────────────────────────────────────
 
 @router.get(
-    "/agents/{agent_id}/analytics",
+    "/agents/{agent_id}/analytics/deep-dive",
     response_model=AgentDeepDiveResponse,
     summary="Agent analytics deep-dive",
     tags=["Dashboard"],
@@ -201,6 +202,38 @@ async def agent_analytics(
 
 
 # ── Live call SSE ─────────────────────────────────────────────────────────────
+#
+# Browsers' native EventSource API cannot attach an Authorization header or a
+# custom X-Org-ID header to the request it makes — both of which the normal
+# auth dependencies (DashReadUser / OrgID) require. That made GET /calls/live
+# unreachable from any real browser regardless of how the token was passed.
+# Fix: a short-lived, single-use ticket. The client calls POST
+# /dashboard/live-calls/ticket first (normal Bearer + X-Org-ID auth, fully
+# permission-checked there), then opens the SSE connection with
+# ?ticket=<ticket> — no long-lived credential ever appears in the URL or
+# browser history, and the ticket is useless after 30s or one use.
+
+_SSE_TICKET_TTL_SEC = 30
+
+
+def _sse_ticket_key(ticket: str) -> str:
+    return f"sse_ticket:{ticket}"
+
+
+@router.post(
+    "/dashboard/live-calls/ticket",
+    summary="Issue a short-lived ticket for the live-call SSE stream",
+    tags=["Dashboard"],
+)
+async def issue_live_calls_ticket(
+    actor: DashReadUser,
+    org_id: OrgID,
+    redis: Redis,
+) -> dict[str, str]:
+    ticket = secrets.token_urlsafe(24)
+    await redis.set(_sse_ticket_key(ticket), str(org_id), ex=_SSE_TICKET_TTL_SEC)
+    return {"ticket": ticket}
+
 
 @router.get(
     "/calls/live",
@@ -214,9 +247,8 @@ async def agent_analytics(
     },
 )
 async def live_calls_stream(
-    actor: DashReadUser,
-    org_id: OrgID,
     redis: Redis,
+    ticket: str = Query(..., description="Ticket from POST /dashboard/live-calls/ticket"),
 ):
     """
     Stream real-time call events (call.started, call.ended, call.failed) via
@@ -226,8 +258,14 @@ async def live_calls_stream(
     ``live_calls:{org_id}`` whenever a call changes state.  This endpoint
     subscribes to that channel and forwards each message to the browser.
 
-    Clients should reconnect automatically on disconnect (SSE spec behaviour).
+    Clients should reconnect automatically on disconnect (SSE spec behaviour);
+    reconnecting means fetching a fresh ticket, since each one is single-use.
     """
+    org_id_raw = await redis.getdel(_sse_ticket_key(ticket))
+    if not org_id_raw:
+        raise HTTPException(status_code=401, detail="Invalid or expired SSE ticket")
+    org_id = UUID(org_id_raw if isinstance(org_id_raw, str) else org_id_raw.decode())
+
     if not _SSE_AVAILABLE:
         from fastapi.responses import PlainTextResponse
         return PlainTextResponse(
@@ -243,14 +281,20 @@ async def live_calls_stream(
         try:
             # Emit an initial keepalive so the browser confirms the connection
             yield json.dumps({"event": "connected", "channel": channel})
-            async for message in pubsub.listen():
-                if message["type"] == "message":
-                    data = message["data"]
-                    if isinstance(data, bytes):
-                        data = data.decode()
-                    yield data
-                # Yield a keepalive comment every ~30 s to prevent proxy timeouts
-                await asyncio.sleep(0)
+            while True:
+                # get_message(timeout=30) actually blocks for up to 30s rather
+                # than the no-op `async for ... ; sleep(0)` this replaced —
+                # that previous version never sent a keepalive during a quiet
+                # channel, so proxies with an idle-connection timeout would
+                # silently drop the stream.
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=30.0)
+                if message is None:
+                    yield json.dumps({"event": "keepalive"})
+                    continue
+                data = message["data"]
+                if isinstance(data, bytes):
+                    data = data.decode()
+                yield data
         except asyncio.CancelledError:
             pass
         finally:

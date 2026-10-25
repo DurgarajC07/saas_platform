@@ -23,6 +23,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.celery_app import celery_app
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
     AgentDeepDiveResponse,
@@ -350,7 +351,6 @@ class AdminService:
         workers are offline the method returns zeros.
         """
         now = datetime.now(UTC)
-        from app.core.celery_app import celery_app
         from app.config import get_settings
 
         queues_cfg = get_settings().CELERY_QUEUES if hasattr(get_settings(), "CELERY_QUEUES") else [

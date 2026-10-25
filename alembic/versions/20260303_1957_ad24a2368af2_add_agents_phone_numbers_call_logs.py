@@ -1,7 +1,7 @@
 """add_agents_phone_numbers_call_logs
 
 Revision ID: ad24a2368af2
-Revises: 34d91b197aa7
+Revises: f3a1c9d04b7e
 Create Date: 2026-03-03 19:57:40.059120
 
 """
@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'ad24a2368af2'
-down_revision: Union[str, None] = '34d91b197aa7'
+down_revision: Union[str, None] = 'f3a1c9d04b7e'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

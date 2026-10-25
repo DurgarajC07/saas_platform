@@ -246,7 +246,9 @@ class AICallClient {
       throw new Error(`WebRTC connect request failed: ${err.message}`);
     }
 
-    this.sessionId = answerData.sessionId ?? answerData.session_id ?? null;
+    // Backend responses are Pydantic CamelModels (app/shared/base_schemas.py),
+    // which always serialize to camelCase — there's no snake_case variant.
+    this.sessionId = answerData.sessionId ?? null;
 
     // 5. (Optional) Re-configure ICE servers if the server returned TURN entries
     if (Array.isArray(answerData.iceServers) && answerData.iceServers.length) {
@@ -329,8 +331,8 @@ class AICallClient {
         throw new Error(`test-call returned ${resp.status}`);
       }
       const data = await resp.json();
-      wsUrl = data.wsUrl ?? data.ws_url;
-      this.sessionId = data.sessionId ?? data.session_id ?? null;
+      wsUrl = data.wsUrl;
+      this.sessionId = data.sessionId ?? null;
     } catch (err) {
       throw new Error(`WebSocket fallback setup failed: ${err.message}`);
     }

@@ -34,9 +34,27 @@ export interface AgentResponse {
   maxCallDurationSec: number
   recordCalls: boolean
   metadata: Record<string, unknown>
+  toolsJson: Record<string, unknown>[] | null
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+}
+
+export interface AgentPromptResponse {
+  agentId: string
+  systemPrompt: string | null
+}
+
+export const PHONE_PROVIDERS = ['twilio', 'vonage', 'own'] as const
+export type PhoneProvider = (typeof PHONE_PROVIDERS)[number]
+
+export interface AgentPhoneNumberResponse {
+  id: string
+  agentId: string
+  phoneNumber: string
+  provider: string
+  isActive: boolean
+  createdAt: string
 }
 
 export interface AgentListResponse {
@@ -103,6 +121,134 @@ export const CREATE_AGENT_DEFAULTS: CreateAgentInput = {
   noiseRemovalLevel: 'none',
   systemPrompt: '',
   welcomeMessage: '',
+}
+
+// ── Prompt editing ─────────────────────────────────────────────────────────────
+export const updatePromptSchema = z.object({
+  systemPrompt: z.string().min(1, 'System prompt is required'),
+  welcomeMessage: z.string().max(1000).optional(),
+})
+
+export type UpdatePromptInput = z.infer<typeof updatePromptSchema>
+
+// ── Phone number assignment ───────────────────────────────────────────────────
+export const assignPhoneNumberSchema = z.object({
+  phoneNumber: z.string().min(7).max(30),
+  provider: z.enum(PHONE_PROVIDERS),
+})
+
+export type AssignPhoneNumberInput = z.infer<typeof assignPhoneNumberSchema>
+
+// ── Tool definitions (flat form shape) ────────────────────────────────────────
+export const EXECUTOR_TYPES = ['http_get', 'http_post', 'sql_query'] as const
+export type ExecutorType = (typeof EXECUTOR_TYPES)[number]
+
+export const PARAMETER_TYPES = ['string', 'number', 'boolean', 'integer'] as const
+
+export const toolParameterSchema = z.object({
+  name: z.string().min(1, 'Parameter name is required'),
+  type: z.enum(PARAMETER_TYPES),
+  description: z.string().optional(),
+  required: z.boolean().default(false),
+})
+
+export const toolDefinitionSchema = z.object({
+  name: z.string().min(1, 'Tool name is required'),
+  description: z.string().optional(),
+  executorType: z.enum(EXECUTOR_TYPES),
+  url: z.string().optional(),
+  sqlQuery: z.string().optional(),
+  parameters: z.array(toolParameterSchema).default([]),
+})
+
+export const toolsFormSchema = z.object({
+  tools: z.array(toolDefinitionSchema).default([]),
+})
+
+export type ToolParameterInput = z.infer<typeof toolParameterSchema>
+export type ToolDefinitionInput = z.infer<typeof toolDefinitionSchema>
+export type ToolsFormInput = z.infer<typeof toolsFormSchema>
+
+// ── Mapping helpers: OpenAI tool JSON <-> flat form shape ─────────────────────
+interface ToolJsonShape {
+  type?: string
+  function?: {
+    name?: string
+    description?: string
+    parameters?: {
+      type?: string
+      properties?: Record<string, { type?: string; description?: string }>
+      required?: string[]
+    }
+  }
+  executor?: {
+    type?: string
+    url?: string
+    method?: string
+    headers?: Record<string, string>
+    query?: string
+  }
+}
+
+export function toolsToFormValues(toolsJson: Record<string, unknown>[] | null | undefined): ToolDefinitionInput[] {
+  if (!toolsJson) return []
+  return toolsJson.map((raw) => {
+    const tool = raw as ToolJsonShape
+    const props = tool.function?.parameters?.properties ?? {}
+    const required = tool.function?.parameters?.required ?? []
+    const parameters: ToolParameterInput[] = Object.entries(props).map(([name, def]) => ({
+      name,
+      type: (PARAMETER_TYPES as readonly string[]).includes(def.type ?? '')
+        ? (def.type as ToolParameterInput['type'])
+        : 'string',
+      description: def.description ?? '',
+      required: required.includes(name),
+    }))
+    const executorType = (EXECUTOR_TYPES as readonly string[]).includes(tool.executor?.type ?? '')
+      ? (tool.executor?.type as ExecutorType)
+      : 'http_get'
+    return {
+      name: tool.function?.name ?? '',
+      description: tool.function?.description ?? '',
+      executorType,
+      url: tool.executor?.url ?? '',
+      sqlQuery: tool.executor?.query ?? '',
+      parameters,
+    }
+  })
+}
+
+export function formValuesToToolsJson(values: ToolsFormInput): Record<string, unknown>[] {
+  return values.tools.map((tool) => {
+    const properties: Record<string, { type: string; description?: string }> = {}
+    const required: string[] = []
+    for (const param of tool.parameters) {
+      properties[param.name] = { type: param.type, description: param.description || undefined }
+      if (param.required) required.push(param.name)
+    }
+
+    const executor: Record<string, unknown> = { type: tool.executorType }
+    if (tool.executorType === 'sql_query') {
+      executor.query = tool.sqlQuery || ''
+    } else {
+      executor.url = tool.url || ''
+      executor.method = tool.executorType === 'http_post' ? 'POST' : 'GET'
+    }
+
+    return {
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description || '',
+        parameters: {
+          type: 'object',
+          properties,
+          required,
+        },
+      },
+      executor,
+    }
+  })
 }
 
 // ── URL filter schema ─────────────────────────────────────────────────────────

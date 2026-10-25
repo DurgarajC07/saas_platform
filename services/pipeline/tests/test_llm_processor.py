@@ -24,6 +24,7 @@ Deliverables verified
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -41,6 +42,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesFrame,
+    StartInterruptionFrame,
     TextFrame,
     TranscriptionFrame,
 )
@@ -481,6 +483,74 @@ class TestErrorHandling:
         types = [type(f) for f in frames]
         assert LLMFullResponseStartFrame in types
         assert LLMFullResponseEndFrame in types
+
+
+# ── TestBargeInCancellation ────────────────────────────────────────────────────
+
+class TestBargeInCancellation:
+    """
+    StartInterruptionFrame must cancel an in-flight generation rather than
+    letting the stream keep running to completion in the background.
+    """
+
+    async def test_interruption_cancels_in_flight_generation(self) -> None:
+        proc = _make_proc()
+        release = asyncio.Event()
+
+        class _SlowStreamingResponse:
+            status = 200
+
+            @property
+            def content(self):
+                async def _aiter():
+                    yield _token_line("Partial response that should ")
+                    await release.wait()  # never set — simulates a long stream
+                    yield _token_line("never arrive.")  # pragma: no cover
+                    yield _done_line()  # pragma: no cover
+                return _aiter()
+
+            async def text(self) -> str:
+                return ""
+
+        mock_session = MagicMock()
+        mock_session.closed = False
+
+        @asynccontextmanager
+        async def mock_post(*_a: Any, **_kw: Any):
+            yield _SlowStreamingResponse()
+
+        mock_session.post = mock_post
+        proc._session = mock_session
+
+        captured: list[Any] = []
+
+        async def capture(f: Any, d: FrameDirection = FrameDirection.DOWNSTREAM) -> None:
+            captured.append(f)
+
+        proc.push_frame = capture  # type: ignore[method-assign]
+
+        run_task = asyncio.create_task(
+            proc.process_frame(_transcription("Hello"), FrameDirection.DOWNSTREAM)
+        )
+        # Let the task start streaming and register _current_task.
+        for _ in range(100):
+            if proc._current_task is not None:
+                break
+            await asyncio.sleep(0)
+        assert proc._current_task is not None, "generation task was never started"
+
+        await proc.process_frame(StartInterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await run_task  # must complete cleanly, not raise
+
+        # Partial output must never reach conversation history.
+        assistant_msgs = [m for m in proc._history if m["role"] == "assistant"]
+        assert assistant_msgs == []
+        assert len(proc._history) == 1  # only the user turn
+        assert proc._current_task is None
+
+        # StartInterruptionFrame is still forwarded downstream for the rest
+        # of the pipeline (TTS flush, etc.) even though we consumed it here.
+        assert any(isinstance(f, StartInterruptionFrame) for f in captured)
 
 
 # ── TestPromptTemplate ─────────────────────────────────────────────────────────

@@ -1,13 +1,17 @@
 # VoiceSaaS Platform — Production Compose
 # ─────────────────────────────────────────────────────────────────────────────
-# Single-command deployment:
+# Deployment:
 #
 #   cp .env.example .env          # fill secrets
+#   docker compose -f docker-compose.infra.yml up -d   # whisper/kokoro/minio for pipeline
 #   docker compose -f docker-compose.prod.yml up -d
 #
 # Prerequisites:
 #   • Docker Engine >= 24 and Compose v2
 #   • .env with all required variables (see .env.example)
+#   • docker-compose.infra.yml already up (creates the external `ai-net`
+#     network and the whisper-1 / kokoro-1 / minio containers the
+#     `pipeline` service below depends on)
 #   • Optional: GPU host with nvidia-docker for VRAM-aware routing
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -21,16 +25,15 @@ x-api-env: &api-env
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-saas_db}
   REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
   QDRANT_URL: http://qdrant:6333
-  APP_ENV: production
-  SECRET_KEY: ${SECRET_KEY}
-  JWT_SECRET: ${JWT_SECRET}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+  ENVIRONMENT: production
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
   ENCRYPTION_KEY: ${ENCRYPTION_KEY}
   TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
   TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
   STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
   STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-  SENTRY_DSN: ${SENTRY_DSN:-}
-  PIPELINE_BASE_URL: http://pipeline:8001
+  PIPELINE_SERVICE_URL: http://pipeline:7000
 
 services:
   # ── API (FastAPI / gunicorn + uvicorn workers) ──────────────────────────────
@@ -50,6 +53,8 @@ services:
       redis:
         condition: service_started
       qdrant:
+        condition: service_started
+      pipeline:
         condition: service_started
     networks: [saas-net]
     volumes:
@@ -155,10 +160,12 @@ services:
 
   # ── Qdrant vector store ─────────────────────────────────────────────────────
   qdrant:
-    image: qdrant/qdrant:v1.8.3
+    image: qdrant/qdrant:v1.9.0
     restart: unless-stopped
-    # NOT exposed to host: only api/worker can reach it on saas-net
+    # NOT exposed to host: only api/worker/pipeline can reach it on saas-net
     expose: ["6333", "6334"]
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
     volumes:
       - qdrantdata:/qdrant/storage
     networks: [saas-net]
@@ -167,6 +174,49 @@ services:
       resources:
         limits:
           memory: 512m
+
+  # ── Pipeline orchestration service (Pipecat real-time call engine) ──────────
+  # Exposes: POST /sessions  WS /sessions/{id}/ws  GET /health
+  # Joins saas-net so the API can reach it at http://pipeline:7000, and the
+  # external ai-net (managed by docker-compose.infra.yml) so it can reach the
+  # whisper / kokoro / minio containers by their service names.
+  pipeline:
+    build:
+      context: ./services/pipeline
+      dockerfile: Dockerfile
+    image: voicesaas-pipeline:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      HOST_WHISPER_URL: "ws://whisper-1:9000/transcribe/stream"
+      HOST_KOKORO_URL: "ws://kokoro-1:8880/tts/stream"
+      HOST_QDRANT_URL: "http://qdrant:6333"
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      HOST_OLLAMA_URL: "http://host.docker.internal:11434"
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+      MINIO_BUCKET: "call-recordings"
+      RECORDING_ENABLED: "${RECORDING_ENABLED:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    expose: ["7000"]
+    depends_on:
+      qdrant:
+        condition: service_started
+    networks: [saas-net, ai-net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7000/health')"]
+      interval: 20s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   # ── Alembic migration job (runs once, exits) ────────────────────────────────
   migrate:
@@ -231,3 +281,8 @@ volumes:
 networks:
   saas-net:
     driver: bridge
+  # Managed by docker-compose.infra.yml (whisper / kokoro / qdrant / minio).
+  # Must be started first: `docker compose -f docker-compose.infra.yml up -d`.
+  ai-net:
+    external: true
+    name: ai-net

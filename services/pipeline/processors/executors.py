@@ -29,8 +29,17 @@ or written to logs.
 
 SQL security model
 ------------------
+* Query parameters are bound with asyncpg's native ``$1, $2, ...``
+  placeholders — ``{param}`` tokens in the ``query`` template are translated
+  to positional placeholders and the matching values are passed to
+  ``conn.fetch(query, *values)``.  Caller-supplied text is never concatenated
+  or ``.format()``-ed into the SQL string, which is what actually defeats
+  boolean/UNION-based injection (a keyword blocklist alone cannot: a payload
+  like ``' OR '1'='1`` contains no DDL/DML keyword).
 * Only SELECT statements are accepted; any DDL / DML keyword triggers an
-  immediate rejection with a human-readable error.
+  immediate rejection with a human-readable error.  This now runs against the
+  *template* (there is no interpolated string anymore) and is defense-in-depth
+  on top of parameterization, not the primary safeguard.
 * An ``allowed_tables`` list (recommended) constrains which tables the
   LLM-generated SQL may reference.  An empty list skips the table check.
 * Results are capped at ``max_rows`` (default 10) to prevent runaway queries.
@@ -61,6 +70,44 @@ _UNSAFE_SQL_RE = re.compile(
 
 # Capture table names that appear after FROM or JOIN keywords
 _TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE)
+
+# Capture ``{param}`` placeholders in a SQL query template (same syntax as the
+# HTTP executors use for URL/body substitution, but here each occurrence is
+# turned into a bound positional parameter instead of inlined text).
+_SQL_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def _parameterize_sql(query_template: str, kwargs: dict[str, Any]) -> tuple[str, list[Any]]:
+    """
+    Translate a ``{param}``-style SQL template into an asyncpg positional
+    query plus an ordered list of bound values.
+
+    Each distinct ``{name}`` placeholder becomes a ``$1, $2, ...`` token (in
+    first-occurrence order); repeated occurrences of the same name reuse the
+    same ``$N``.  The values list is built strictly from ``kwargs`` — the
+    caller-supplied argument text itself never touches the query string, so
+    it is passed to ``conn.fetch()`` as a bound parameter and can only ever
+    be treated as a literal value, not as SQL syntax.
+
+    Raises
+    ------
+    KeyError
+        If a placeholder has no matching entry in *kwargs*.
+    """
+    positions: dict[str, int] = {}
+    values: list[Any] = []
+
+    def _sub(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in kwargs:
+            raise KeyError(name)
+        if name not in positions:
+            values.append(kwargs[name])
+            positions[name] = len(values)
+        return f"${positions[name]}"
+
+    query = _SQL_PLACEHOLDER_RE.sub(_sub, query_template)
+    return query, values
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -256,8 +303,12 @@ class SQLQueryExecutor(BaseExecutor):
     ------------------------
     dsn_secret_ref   (required) — Key in ``org_secrets`` that holds the
                                   PostgreSQL DSN (e.g. ``"DB_DSN"``).
-    query            (required) — SQL template; ``{param}`` placeholders
-                                  filled from tool call arguments.
+    query            (required) — SQL template; ``{param}`` placeholders are
+                                  bound as asyncpg ``$1, $2, ...`` positional
+                                  parameters from tool call arguments — do
+                                  **not** quote them as string literals (no
+                                  surrounding ``'...'``), asyncpg binds the
+                                  value's real type.
     allowed_tables   (optional) — Allowlist of table names.  Empty → no check.
     max_rows         (optional) — Row result cap (default 10).
 
@@ -268,7 +319,7 @@ class SQLQueryExecutor(BaseExecutor):
         "executor": {
             "type": "sql_query",
             "dsn_secret_ref": "ORDERS_DB_DSN",
-            "query": "SELECT id, status, updated_at FROM orders WHERE id = '{order_id}'",
+            "query": "SELECT id, status, updated_at FROM orders WHERE id = {order_id}",
             "allowed_tables": ["orders"],
             "max_rows": 5
         }
@@ -278,7 +329,10 @@ class SQLQueryExecutor(BaseExecutor):
         """
         Return ``(is_safe, rejection_reason)``.
 
-        Checks DDL/DML keywords first, then the table allowlist.
+        Checks DDL/DML keywords first, then the table allowlist.  Runs
+        against the ``{param}``-templated query (not an interpolated
+        string — see ``_parameterize_sql``), as defense-in-depth on top of
+        parameterized binding, which is what actually stops injection.
         """
         if _UNSAFE_SQL_RE.search(query):
             return False, "DDL/DML statements are not permitted"
@@ -302,19 +356,27 @@ class SQLQueryExecutor(BaseExecutor):
                 )
             }
 
-        # 2. Fill query template
+        # 2. Security checks — run against the raw {param} template.  There is
+        # no string interpolation step anymore (see _parameterize_sql below),
+        # so this is defense-in-depth on the template shape, not a guard
+        # against caller-supplied values.
         query_template = self._config.get("query", "")
+        allowed_tables: list[str] = self._config.get("allowed_tables", [])
+        safe, reason = self._is_safe(query_template, allowed_tables)
+        if not safe:
+            log.warning("sql.blocked", reason=reason, query=query_template[:200])
+            return {"error": f"Query not permitted: {reason}"}
+
+        # 3. Translate {param} placeholders into asyncpg positional binds.
+        # Values are taken from kwargs and passed to conn.fetch() as bound
+        # parameters — they are never concatenated into the query string, so
+        # a caller/LLM-supplied value like "' OR '1'='1" or a UNION SELECT
+        # payload is bound as an opaque literal and cannot alter query
+        # structure (no boolean/UNION-based injection via this path).
         try:
-            query = query_template.format(**kwargs)
+            query, bound_values = _parameterize_sql(query_template, kwargs)
         except KeyError as exc:
             return {"error": f"SQL query missing required parameter: {exc}"}
-
-        # 3. Security checks
-        allowed_tables: list[str] = self._config.get("allowed_tables", [])
-        safe, reason = self._is_safe(query, allowed_tables)
-        if not safe:
-            log.warning("sql.blocked", reason=reason, query=query[:200])
-            return {"error": f"Query not permitted: {reason}"}
 
         # 4. Execute
         max_rows: int = self._config.get("max_rows", 10)
@@ -322,7 +384,7 @@ class SQLQueryExecutor(BaseExecutor):
             import asyncpg  # deferred import — only required when SQL executor is used
             conn = await asyncpg.connect(dsn)
             try:
-                rows = await conn.fetch(query)
+                rows = await conn.fetch(query, *bound_values)
                 result = [dict(r) for r in rows[:max_rows]]
                 log.info("sql.executed", row_count=len(result), table_hint=query[:60])
                 return json.dumps(result)

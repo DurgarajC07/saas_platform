@@ -182,6 +182,26 @@ async def _extract_text(data: bytes, file_name: str, file_type: str, source_url:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+_ingestor_singleton: "KnowledgeBaseIngestor | None" = None
+
+
+def _get_ingestor() -> "KnowledgeBaseIngestor":
+    """
+    Return the process-wide ``KnowledgeBaseIngestor`` singleton.
+
+    ``KnowledgeBaseIngestor.__init__`` loads a FastEmbed ONNX model, which is
+    expensive to reload. ``delete_document``/`clear_all`` previously
+    constructed a fresh instance per HTTP request purely to call a Qdrant
+    delete — paying the full model-load cost for an operation that never
+    touches the embedder. Ingestion (which genuinely needs the embedder) and
+    pure-deletion paths now share this one instance.
+    """
+    global _ingestor_singleton
+    if _ingestor_singleton is None:
+        _ingestor_singleton = KnowledgeBaseIngestor()
+    return _ingestor_singleton
+
+
 class KnowledgeBaseIngestor:
     """
     Low-level ingestion engine — stateless, no DB access.
@@ -370,8 +390,9 @@ class KnowledgeBaseService:
     •  clear_all        — drop entire collection + all DB records
     """
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, redis=None) -> None:
         self._db = db
+        self._redis = redis
         self._repo = KbDocumentRepository(db)
         self._agent_repo = AgentRepository(db)
 
@@ -398,6 +419,21 @@ class KnowledgeBaseService:
         dispatch the ``async_ingest_document`` Celery task.
         """
         agent = await self._get_agent_or_404(agent_id, org_id)
+
+        # ── Plan limit: KB documents per agent ───────────────────────────
+        if self._redis is not None:
+            from app.modules.features.service import FeatureService
+
+            feature_svc = FeatureService(self._db, self._redis)
+            result = await feature_svc.check(org_id, "ai.rag.doc_limit")
+            if result.enabled and result.limit:
+                existing_docs = await self._repo.list_by_agent(agent_id)
+                if len(existing_docs) >= result.limit:
+                    raise ValidationException(
+                        f"Knowledge-base document limit reached ({result.limit} "
+                        "documents per agent on your plan). Upgrade your plan or "
+                        "delete an existing document to continue."
+                    )
 
         # ── Determine file type ──────────────────────────────────────────
         fname: str = getattr(file, "filename", None) or (source_url or "document")
@@ -508,7 +544,7 @@ class KnowledgeBaseService:
             raise NotFoundException(f"Document {doc_id} not found")
 
         collection = _collection_name(org_id, agent_id)
-        ingestor = KnowledgeBaseIngestor()
+        ingestor = _get_ingestor()
         chunks_deleted = await ingestor.delete_document_chunks(
             collection=collection, doc_id=str(doc_id)
         )
@@ -534,7 +570,7 @@ class KnowledgeBaseService:
         """Drop the entire Qdrant collection and remove all KB document records."""
         await self._get_agent_or_404(agent_id, org_id)
         collection = _collection_name(org_id, agent_id)
-        ingestor = KnowledgeBaseIngestor()
+        ingestor = _get_ingestor()
         await ingestor.drop_collection(collection)
 
         # Bulk-delete all DB records for this agent

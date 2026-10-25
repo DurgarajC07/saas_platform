@@ -303,7 +303,12 @@ async def transcribe_ws(ws: WebSocket) -> None:
     """
     await ws.accept()
     remote = ws.client.host if ws.client else "unknown"
-    log = logger.bind(remote=remote)
+    # Honor the same `language` hint the blocking /transcribe endpoint accepts
+    # as a form field — here it arrives as a WS query param (see
+    # WhisperSTTProcessor._connect() in the pipeline service, which appends
+    # `?language=<code>`). Absent/empty → None, which keeps auto-detection.
+    language = ws.query_params.get("language") or None
+    log = logger.bind(remote=remote, language=language)
     log.info("whisper.ws_connected")
 
     audio_buffer: bytearray = bytearray()
@@ -330,7 +335,7 @@ async def transcribe_ws(ws: WebSocket) -> None:
                     )
                     segments_iter, info = _model.transcribe(
                         audio_np,
-                        language=None,         # auto-detect per utterance
+                        language=language,     # hinted via ?language=<code>, else auto-detect
                         vad_filter=False,      # Pipecat handles VAD externally
                         word_timestamps=True,
                         beam_size=5,

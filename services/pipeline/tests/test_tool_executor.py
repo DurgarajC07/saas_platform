@@ -333,6 +333,126 @@ class TestSQLQueryExecutorSecurity:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SQLQueryExecutor parameterization — injection must not reach the SQL string
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSQLQueryExecutorParameterization:
+    """
+    Proves {param} values are bound via asyncpg positional placeholders
+    ($1, $2, ...) rather than interpolated into the query text — so a
+    malicious value can only ever be treated as a literal, never as SQL.
+    """
+
+    def test_parameterize_translates_placeholder_to_positional(self):
+        from processors.executors import _parameterize_sql
+
+        query, values = _parameterize_sql(
+            "SELECT id, status FROM orders WHERE id = {order_id}",
+            {"order_id": "ORD-1"},
+        )
+        assert query == "SELECT id, status FROM orders WHERE id = $1"
+        assert values == ["ORD-1"]
+
+    def test_parameterize_repeated_placeholder_reuses_position(self):
+        from processors.executors import _parameterize_sql
+
+        query, values = _parameterize_sql(
+            "SELECT * FROM orders WHERE id = {id} OR parent_id = {id}",
+            {"id": "ORD-1"},
+        )
+        assert query == "SELECT * FROM orders WHERE id = $1 OR parent_id = $1"
+        assert values == ["ORD-1"]
+
+    def test_parameterize_missing_kwarg_raises_keyerror(self):
+        from processors.executors import _parameterize_sql
+
+        with pytest.raises(KeyError):
+            _parameterize_sql("SELECT * FROM orders WHERE id = {order_id}", {})
+
+    async def test_boolean_injection_payload_bound_as_literal_not_executed(self, monkeypatch):
+        """
+        A classic boolean-based injection payload in a bound parameter must
+        never alter the query sent to the database — it must arrive as the
+        second positional argument to conn.fetch(), untouched, not as SQL
+        text concatenated into the first argument.
+        """
+        cfg = {
+            "dsn_secret_ref": "DB",
+            "query": "SELECT id, status FROM orders WHERE id = {order_id}",
+            "allowed_tables": ["orders"],
+        }
+        ex = SQLQueryExecutor(cfg, secrets={"DB": "postgresql://x"})
+        payload = "' OR '1'='1"
+
+        captured: dict = {}
+
+        class _FakeConn:
+            async def fetch(self, query, *args):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+            async def close(self):
+                pass
+
+        async def _fake_connect(dsn):
+            return _FakeConn()
+
+        import sys
+        import types
+
+        fake_asyncpg = types.SimpleNamespace(connect=_fake_connect)
+        monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+
+        result = await ex.execute(order_id=payload)
+
+        # The injection payload never appears inside the query string itself.
+        assert payload not in captured["query"]
+        assert captured["query"] == "SELECT id, status FROM orders WHERE id = $1"
+        # It is passed through unchanged as a bound literal value.
+        assert captured["args"] == (payload,)
+        assert result == "[]"
+
+    async def test_union_injection_payload_bound_as_literal_not_executed(self, monkeypatch):
+        """Same guarantee for a UNION-based exfiltration payload."""
+        cfg = {
+            "dsn_secret_ref": "DB",
+            "query": "SELECT id, status FROM orders WHERE id = {order_id}",
+            "allowed_tables": ["orders"],
+        }
+        ex = SQLQueryExecutor(cfg, secrets={"DB": "postgresql://x"})
+        payload = "' UNION SELECT password FROM admin_users--"
+
+        captured: dict = {}
+
+        class _FakeConn:
+            async def fetch(self, query, *args):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+            async def close(self):
+                pass
+
+        async def _fake_connect(dsn):
+            return _FakeConn()
+
+        import sys
+        import types
+
+        fake_asyncpg = types.SimpleNamespace(connect=_fake_connect)
+        monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+
+        result = await ex.execute(order_id=payload)
+
+        assert "UNION" not in captured["query"]
+        assert "admin_users" not in captured["query"]
+        assert captured["query"] == "SELECT id, status FROM orders WHERE id = $1"
+        assert captured["args"] == (payload,)
+        assert result == "[]"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PythonFunctionExecutor stub
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -101,6 +101,8 @@ async def _ingest_async(
 ) -> dict:
     """Async body of the ingestion task — runs inside asyncio.run()."""
     from app.core.database import AsyncSessionFactory
+    from app.core.redis import get_redis
+    from app.modules.agents.events import publish_kb_ingestion_complete
     from app.modules.agents.kb_repository import KbDocumentRepository
     from app.modules.agents.kb_service import KnowledgeBaseIngestor, _extract_text
 
@@ -154,6 +156,22 @@ async def _ingest_async(
                 file_name=file_name,
                 chunk_count=chunk_count,
             )
+
+            # 5b. Fire the kb.ingestion.complete event (SSE + customer webhook).
+            # Best-effort: publish_kb_ingestion_complete never raises, but we
+            # still guard the redis handle itself in case it's unreachable —
+            # a notification failure must never undo a completed ingestion.
+            try:
+                redis = await get_redis()
+                await publish_kb_ingestion_complete(
+                    db, redis,
+                    org_id=UUID(org_id),
+                    agent_id=UUID(agent_id),
+                    doc_id=UUID(doc_id),
+                    chunk_count=chunk_count,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("rag_ingest.event_publish_failed", doc_id=doc_id, error=str(exc))
 
         except Exception as exc:
             # 6. Mark failed — do NOT re-raise here; Celery retry logic is in

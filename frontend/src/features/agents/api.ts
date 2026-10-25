@@ -1,5 +1,12 @@
 import { apiClient } from '@/shared/api/client'
-import type { AgentResponse, AgentListResponse, CreateAgentInput } from './schemas'
+import type {
+  AgentResponse,
+  AgentListResponse,
+  CreateAgentInput,
+  AgentPromptResponse,
+  AgentPhoneNumberResponse,
+  AssignPhoneNumberInput,
+} from './schemas'
 
 interface AgentListParams {
   page?: number
@@ -86,5 +93,53 @@ export const agentsApi = {
       agent_ids: ids,
     })
     return data
+  },
+
+  /** GET /agents/:id/prompt */
+  getPrompt: async (id: string): Promise<AgentPromptResponse> => {
+    const { data } = await apiClient.get<AgentPromptResponse>(`/agents/${id}/prompt`)
+    return data
+  },
+
+  /** PUT /agents/:id/prompt */
+  updatePrompt: async (id: string, systemPrompt: string): Promise<AgentPromptResponse> => {
+    const { data } = await apiClient.put<AgentPromptResponse>(`/agents/${id}/prompt`, {
+      system_prompt: systemPrompt,
+    })
+    return data
+  },
+
+  /** PUT /agents/:id/tools */
+  updateTools: async (
+    id: string,
+    toolsJson: Record<string, unknown>[],
+  ): Promise<AgentResponse> => {
+    const { data } = await apiClient.put<AgentResponse>(`/agents/${id}/tools`, {
+      tools_json: toolsJson,
+    })
+    return data
+  },
+
+  /** GET /agents/:id/phone-numbers */
+  listPhoneNumbers: async (id: string): Promise<AgentPhoneNumberResponse[]> => {
+    const { data } = await apiClient.get<AgentPhoneNumberResponse[]>(`/agents/${id}/phone-numbers`)
+    return data
+  },
+
+  /** POST /agents/:id/phone-numbers */
+  assignPhoneNumber: async (
+    id: string,
+    body: AssignPhoneNumberInput,
+  ): Promise<AgentPhoneNumberResponse> => {
+    const { data } = await apiClient.post<AgentPhoneNumberResponse>(`/agents/${id}/phone-numbers`, {
+      phone_number: body.phoneNumber,
+      provider: body.provider,
+    })
+    return data
+  },
+
+  /** DELETE /agents/:id/phone-numbers/:phoneNumberId */
+  unassignPhoneNumber: async (id: string, phoneNumberId: string): Promise<void> => {
+    await apiClient.delete(`/agents/${id}/phone-numbers/${phoneNumberId}`)
   },
 }

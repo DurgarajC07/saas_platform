@@ -50,7 +50,13 @@ async def _dispatch_webhook(session, org_id: UUID, event: str, payload: dict) ->
         svc = WebhookService(session)
         await svc.dispatch_event(org_id, event, payload)
     except Exception as exc:  # noqa: BLE001
-        log.warning("events.webhook_dispatch_failed", event=event, error=str(exc))
+        # NOTE: kwarg must NOT be named `event` — structlog's BoundLogger
+        # already takes `event` as its first positional arg (the log
+        # message itself), so `event=event` collided with it and raised
+        # TypeError from inside this "never raises" error handler, meaning
+        # a real webhook-delivery failure used to crash the caller instead
+        # of being swallowed as designed.
+        log.warning("events.webhook_dispatch_failed", webhook_event=event, error=str(exc))
 
 
 # ── call.started ──────────────────────────────────────────────────────────────

@@ -96,9 +96,12 @@ class TestAdminServiceQueue:
             mock_app.control.inspect.return_value.active.return_value = None
             result = AdminService.queue_status()
 
-        # All queue depths should be integers (possibly 0)
+        # All queue depths should be integers (possibly 0). QueueInfo has no
+        # single "depth" field — "pending" is what queue_status() populates
+        # from the reserved-task count, which is the queue-depth figure.
         for q in result.queues:
-            assert isinstance(q.depth, int)
+            assert isinstance(q.pending, int)
+            assert q.pending == 0
 
     def test_celery_exception_returns_zeros(self):
         """queue_status() must never raise."""

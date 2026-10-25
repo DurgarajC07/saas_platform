@@ -50,12 +50,14 @@ try:
 
     _cfg = _get_settings()
     _QDRANT_URL = _cfg.QDRANT_URL
+    _QDRANT_API_KEY = _cfg.QDRANT_API_KEY or None
     _EMBED_MODEL = _cfg.RAG_EMBED_MODEL
     _CHUNK_SIZE = _cfg.RAG_CHUNK_SIZE
     _CHUNK_OVERLAP = _cfg.RAG_CHUNK_OVERLAP
     _SCORE_THRESHOLD = float(_cfg.RAG_SCORE_THRESHOLD)
 except Exception:  # running standalone, config not available
     _QDRANT_URL = _QDRANT_URL_DEFAULT
+    _QDRANT_API_KEY = None
     _EMBED_MODEL = "BAAI/bge-small-en-v1.5"
     _CHUNK_SIZE = 512
     _CHUNK_OVERLAP = 50
@@ -103,9 +105,9 @@ class KnowledgeBaseIngestor:
     CHUNK_OVERLAP: int = _CHUNK_OVERLAP
     VECTOR_SIZE: int = 384
 
-    def __init__(self, qdrant_url: str = _QDRANT_URL) -> None:
+    def __init__(self, qdrant_url: str = _QDRANT_URL, qdrant_api_key: str | None = _QDRANT_API_KEY) -> None:
         self._embedder = TextEmbedding(self.EMBED_MODEL)
-        self._qdrant = AsyncQdrantClient(url=qdrant_url)
+        self._qdrant = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
 
     # ── Collection ────────────────────────────────────────────────────────
 

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Float, cast, func, select, update
+from sqlalchemy import Float, cast, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.agents.models import Agent, AgentPhoneNumber, CallLog
@@ -142,6 +142,23 @@ class AgentPhoneNumberRepository:
         ).scalars().all()
         return list(rows)
 
+    async def get_by_id_and_agent(
+        self, phone_number_id: UUID, agent_id: UUID
+    ) -> AgentPhoneNumber | None:
+        result = await self.session.execute(
+            select(AgentPhoneNumber).where(
+                AgentPhoneNumber.id == phone_number_id,
+                AgentPhoneNumber.agent_id == agent_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def delete(self, phone_number_id: UUID) -> None:
+        await self.session.execute(
+            delete(AgentPhoneNumber).where(AgentPhoneNumber.id == phone_number_id)
+        )
+        await self.session.flush()
+
 
 # ── CallLogRepository ────────────────────────────────────────────────────────
 
@@ -187,6 +204,30 @@ class CallLogRepository:
         )
         if status:
             stmt = stmt.where(CallLog.status == status)
+        stmt = stmt.order_by(CallLog.created_at.desc())
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total = (await self.session.execute(count_stmt)).scalar_one()
+        rows = (
+            await self.session.execute(stmt.offset(offset).limit(limit))
+        ).scalars().all()
+        return list(rows), total
+
+    async def list_by_org(
+        self,
+        org_id: UUID,
+        *,
+        status: str | None = None,
+        agent_id: UUID | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[CallLog], int]:
+        """Org-wide call history (across all agents) for the global calls page."""
+        stmt = select(CallLog).where(CallLog.org_id == org_id)
+        if status:
+            stmt = stmt.where(CallLog.status == status)
+        if agent_id:
+            stmt = stmt.where(CallLog.agent_id == agent_id)
         stmt = stmt.order_by(CallLog.created_at.desc())
 
         count_stmt = select(func.count()).select_from(stmt.subquery())

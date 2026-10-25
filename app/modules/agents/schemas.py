@@ -263,6 +263,29 @@ class UpdateToolsRequest(CamelModel):
     tools_json: list[dict[str, Any]] = Field(default_factory=list)
 
 
+# ── Org secrets (tool-executor credentials) ──────────────────────────────────
+
+
+class SetOrgSecretRequest(CamelModel):
+    """
+    Set (or overwrite) one org-level secret used by tool executors.
+
+    ``key`` is substituted as ``{KEY}`` inside a tool's ``executor`` config
+    (e.g. a ``dsn_secret_ref`` or an HTTP header template) — never stored in
+    ``tools_json`` itself. ``value`` is encrypted at rest and never returned
+    by any endpoint once set.
+    """
+
+    key: str = Field(..., min_length=1, max_length=100)
+    value: str = Field(..., min_length=1)
+
+
+class OrgSecretListResponse(CamelModel):
+    """Secret *names* only — values are write-only and never returned."""
+
+    keys: list[str] = Field(default_factory=list)
+
+
 # ── Test-call response ───────────────────────────────────────────────────────
 
 class TestCallResponse(CamelModel):

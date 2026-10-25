@@ -8,16 +8,20 @@ turn — the LLM will ground its response in the retrieved content.
 
 Embedding model
 ---------------
-Uses ``fastembed`` (BAAI/bge-small-en, 384d) — a CPU-only ONNX embedding
+Uses ``fastembed`` (BAAI/bge-small-en-v1.5, 384d) — a CPU-only ONNX embedding
 library that requires no GPU and no API key.  The model is cached in the
-container after the first use.
+container after the first use.  This MUST match the model used at ingestion
+time in ``app/modules/agents/kb_service.py`` — a mismatch puts query and
+document vectors in different embedding spaces and silently degrades
+retrieval quality (dimension stays 384 either way, so no schema break, but
+results get worse).
 
 Enabled only when ``agent_config.qdrant_collection`` is set.
 
 Frame flow
 ----------
 TranscriptionFrame(text="user utterance")
-    → Qdrant query (BAAI/bge-small-en embedding)
+    → Qdrant query (BAAI/bge-small-en-v1.5 embedding)
     → LLMMessagesFrame(messages=[
         {"role": "system", "content": "<RAG context>"},
         {"role": "user",   "content": "user utterance"},
@@ -117,9 +121,18 @@ class RAGRetrievalProcessor(FrameProcessor):
             # Load embedding model in thread pool (CPU-bound ONNX init)
             self._embedder = await loop.run_in_executor(
                 None,
-                lambda: TextEmbedding("BAAI/bge-small-en"),
+                # Must match the model kb_service.py uses at ingestion time
+                # (app/modules/agents/kb_service.py) — otherwise query and
+                # document vectors live in different embedding spaces and
+                # similarity search silently degrades. Both are 384-dim, so
+                # this is a drop-in correction, not a re-index requirement.
+                lambda: TextEmbedding("BAAI/bge-small-en-v1.5"),
             )
-            self._client = AsyncQdrantClient(url=self._qdrant_url)
+            import os
+            self._client = AsyncQdrantClient(
+                url=self._qdrant_url,
+                api_key=os.getenv("QDRANT_API_KEY") or None,
+            )
             self._log.info("rag.clients_ready")
 
         except ImportError as exc:

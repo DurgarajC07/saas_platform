@@ -12,6 +12,8 @@ Features
 * System prompt template variables resolved at session start
 * OpenAI-compatible function/tool calling — routes to ``ToolExecutorProcessor``
 * Sentence-boundary batching: TextFrame pushed when ``.`` / ``!`` / ``?`` seen
+* Barge-in aware: ``StartInterruptionFrame`` cancels the in-flight Ollama
+  stream instead of letting it run to completion in the background
 * LLM model hot-swappable via ``AgentConfig.llm_model``
 * ``update_system_prompt()`` for mid-session prompt updates
 * Structured TTFB and tokens/s logging
@@ -42,6 +44,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesFrame,
+    StartInterruptionFrame,
     TextFrame,
     TranscriptionFrame,
 )
@@ -104,6 +107,11 @@ class OllamaLLMProcessor(FrameProcessor):
         self._chat_url      = f"{ollama_url.rstrip('/')}/api/chat"
         self._session: aiohttp.ClientSession | None = None
         self._history: list[dict[str, str]] = []   # user/assistant turn pairs
+        # Tracks the in-flight _run_llm() generation task so a barge-in
+        # (StartInterruptionFrame) can cancel it instead of letting the old
+        # stream keep running, get appended to history, and hold a
+        # GPU-bound concurrent-call slot.
+        self._current_task: asyncio.Task | None = None
         self._log = logger.bind(processor="OllamaLLM", model=model)
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
@@ -132,13 +140,25 @@ class OllamaLLMProcessor(FrameProcessor):
                 text=frame.text[:80],
                 history_len=len(self._history),
             )
-            await self._run_llm()
+            await self._run_llm_cancellable()
 
         elif isinstance(frame, LLMMessagesFrame):
             # Tool-result re-entry from ToolExecutorProcessor — extend history
             for msg in frame.messages:
                 self._history.append(msg)
-            await self._run_llm()
+            await self._run_llm_cancellable()
+
+        elif isinstance(frame, StartInterruptionFrame):
+            # Barge-in: abort the in-flight generation so it stops consuming
+            # a GPU-bound call slot and its partial output is never appended
+            # to history (the user never heard it).
+            if self._current_task and not self._current_task.done():
+                self._log.info(
+                    "ollama_llm.barge_in_cancel",
+                    history_len=len(self._history),
+                )
+                self._current_task.cancel()
+            await self.push_frame(frame, direction)
 
         elif isinstance(frame, EndFrame):
             await self._close_session()
@@ -148,6 +168,25 @@ class OllamaLLMProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
 
     # ── Internal ────────────────────────────────────────────────────────────
+
+    async def _run_llm_cancellable(self) -> None:
+        """
+        Run ``_run_llm()`` as a cancellable background task.
+
+        Storing the task on ``self._current_task`` lets a concurrently
+        delivered ``StartInterruptionFrame`` (see ``process_frame`` above)
+        cancel the in-flight generation.  ``asyncio.CancelledError`` raised
+        by that cancellation is swallowed here — ``_run_llm`` has already
+        done its own cleanup (discarding the partial response) before it
+        re-raises.
+        """
+        self._current_task = asyncio.create_task(self._run_llm())
+        try:
+            await self._current_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._current_task = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if not self._session or self._session.closed:
@@ -193,6 +232,7 @@ class OllamaLLMProcessor(FrameProcessor):
         first_token_ms: float | None = None
         full_response: str = ""
         text_buf: str = ""
+        cancelled = False
 
         await self.push_frame(LLMFullResponseStartFrame())
 
@@ -271,29 +311,48 @@ class OllamaLLMProcessor(FrameProcessor):
                 TextFrame(text="I'm having trouble connecting to my language model.")
             )
 
-        finally:
-            # Flush any remaining buffered text
-            if text_buf.strip():
-                await self.push_frame(TextFrame(text=text_buf))
-
-            elapsed = round((time.perf_counter() - t0) * 1000, 1)
-            tps = round(token_count / max(elapsed / 1000, 0.001), 1)
+        except asyncio.CancelledError:
+            # Barge-in: self._current_task.cancel() was called from
+            # process_frame(). Discard the partial response — the user
+            # never heard it, so it must not be appended to history — and
+            # skip the normal end-of-turn bookkeeping below. The `async
+            # with session.post(...)` block above has already unwound on
+            # this CancelledError, which closes the aiohttp response/stream
+            # (no leaked connection). Re-raise so the task actually ends up
+            # cancelled, as asyncio expects.
+            cancelled = True
             self._log.info(
-                "ollama_llm.done",
-                tokens=token_count,
-                elapsed_ms=elapsed,
-                tokens_per_s=tps,
-                first_token_ms=first_token_ms,
+                "ollama_llm.generation_cancelled",
+                reason="barge_in",
+                tokens_generated=token_count,
+                discarded_chars=len(full_response),
             )
+            raise
 
-            await self.push_frame(LLMFullResponseEndFrame())
+        finally:
+            if not cancelled:
+                # Flush any remaining buffered text
+                if text_buf.strip():
+                    await self.push_frame(TextFrame(text=text_buf))
 
-            # Persist assistant response and enforce history cap
-            if full_response:
-                self._history.append(
-                    {"role": "assistant", "content": full_response}
+                elapsed = round((time.perf_counter() - t0) * 1000, 1)
+                tps = round(token_count / max(elapsed / 1000, 0.001), 1)
+                self._log.info(
+                    "ollama_llm.done",
+                    tokens=token_count,
+                    elapsed_ms=elapsed,
+                    tokens_per_s=tps,
+                    first_token_ms=first_token_ms,
                 )
-            self._trim_history()
+
+                await self.push_frame(LLMFullResponseEndFrame())
+
+                # Persist assistant response and enforce history cap
+                if full_response:
+                    self._history.append(
+                        {"role": "assistant", "content": full_response}
+                    )
+                self._trim_history()
 
     def _trim_history(self) -> None:
         """

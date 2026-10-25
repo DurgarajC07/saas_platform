@@ -6,6 +6,7 @@
 # Web framework
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+gunicorn>=23.0.0
 python-multipart>=0.0.12
 
 # Database
@@ -14,7 +15,7 @@ asyncpg>=0.30.0
 alembic>=1.14.0
 
 # Validation & config
-pydantic>=2.10.0
+pydantic[email]>=2.10.0
 pydantic-settings>=2.6.0
 
 # Cache / queues
@@ -26,26 +27,38 @@ python-jose[cryptography]>=3.3.0
 argon2-cffi>=23.1.0
 cryptography>=44.0.0
 pyotp>=2.9.0
+authlib>=1.6.8
 
 # Storage
 aioboto3>=13.0.0
+python-magic>=0.4.27
 
-# Logging
+# Billing
+stripe>=14.4.0
+
+# Logging / metrics
 structlog>=24.4.0
+prometheus-client>=0.24.1
 
 # HTTP client
 httpx>=0.28.0
 
 # Utilities
 python-slugify>=8.0.4
+websockets>=16.0
+numpy>=2.4.2
 
 # Twilio PSTN — outbound call API, TwiML generation, signature validation
-twilio>=9.0.0
+twilio>=9.10.2
 
 # Real-time SSE streaming (live call monitor)
-sse-starlette>=2.1.0
+sse-starlette>=3.3.2
 
-# GPU metrics (graceful no-op when NVIDIA hardware is absent)
+# GPU metrics — imported by app/modules/dashboard for VRAM/GPU-status
+# reporting with a graceful no-op fallback when NVIDIA hardware/driver is
+# absent (see app/modules/dashboard). Intentionally NOT in pyproject.toml's
+# [project] dependencies: it is only ever imported inside a try/except and
+# must stay optional so non-GPU hosts can install cleanly.
 pynvml>=11.5.0
 
 # RAG / knowledge base

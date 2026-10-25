@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 import { queryKeys } from '@/shared/api/query-keys'
 import { getErrorMessage } from '@/shared/api/error-handler'
 import { agentsApi } from './api'
-import type { CreateAgentInput } from './schemas'
+import type { CreateAgentInput, AssignPhoneNumberInput } from './schemas'
 
 interface AgentListFilters {
   page?: number
@@ -122,6 +122,86 @@ export function useBulkDeleteAgents() {
     onSuccess: (res) => {
       void qc.invalidateQueries({ queryKey: queryKeys.agents.all() })
       toast.success(`${res.deleted} agents deleted.`)
+    },
+    onError: (err) => {
+      toast.error(getErrorMessage(err))
+    },
+  })
+}
+
+// ─── usePrompt ────────────────────────────────────────────────────────────────
+export function usePrompt(id: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.agents.prompt(id ?? ''),
+    queryFn: () => agentsApi.getPrompt(id ?? ''),
+    enabled: Boolean(id),
+    staleTime: 60_000,
+  })
+}
+
+// ─── useUpdatePrompt ──────────────────────────────────────────────────────────
+export function useUpdatePrompt(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (systemPrompt: string) => agentsApi.updatePrompt(id, systemPrompt),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.agents.prompt(id) })
+      toast.success('Prompt updated.')
+    },
+    onError: (err) => {
+      toast.error(getErrorMessage(err))
+    },
+  })
+}
+
+// ─── useUpdateTools ───────────────────────────────────────────────────────────
+export function useUpdateTools(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (toolsJson: Record<string, unknown>[]) => agentsApi.updateTools(id, toolsJson),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.agents.detail(id) })
+      toast.success('Tools updated.')
+    },
+    onError: (err) => {
+      toast.error(getErrorMessage(err))
+    },
+  })
+}
+
+// ─── usePhoneNumbers ──────────────────────────────────────────────────────────
+export function usePhoneNumbers(id: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.agents.phones(id ?? ''),
+    queryFn: () => agentsApi.listPhoneNumbers(id ?? ''),
+    enabled: Boolean(id),
+    staleTime: 30_000,
+  })
+}
+
+// ─── useAssignPhoneNumber ─────────────────────────────────────────────────────
+export function useAssignPhoneNumber(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: AssignPhoneNumberInput) => agentsApi.assignPhoneNumber(id, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.agents.phones(id) })
+      toast.success('Phone number assigned.')
+    },
+    onError: (err) => {
+      toast.error(getErrorMessage(err))
+    },
+  })
+}
+
+// ─── useUnassignPhoneNumber ───────────────────────────────────────────────────
+export function useUnassignPhoneNumber(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (phoneNumberId: string) => agentsApi.unassignPhoneNumber(id, phoneNumberId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.agents.phones(id) })
+      toast.success('Phone number unassigned.')
     },
     onError: (err) => {
       toast.error(getErrorMessage(err))

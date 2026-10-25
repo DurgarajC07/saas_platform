@@ -42,14 +42,22 @@ except ImportError:  # pragma: no cover
     _TWILIO_AVAILABLE = False
 
 from app.config import get_settings
-from app.core.exceptions import ConflictException, NotFoundException
+from app.core.exceptions import (
+    ConflictException,
+    ForbiddenException,
+    NotFoundException,
+    ServiceUnavailableException,
+)
 from app.modules.audit.service import AuditService
+from app.modules.agents.credits import CallCreditService
 from app.modules.agents.models import Agent, AgentPhoneNumber, CallLog
 from app.modules.agents.repository import (
     AgentPhoneNumberRepository,
     AgentRepository,
     CallLogRepository,
 )
+from app.modules.agents.secrets_service import OrgSecretsService
+from app.modules.features.service import FeatureService
 from app.modules.agents.schemas import (
     AgentAnalyticsResponse,
     AgentListResponse,
@@ -87,6 +95,40 @@ def _slugify(name: str) -> str:
     return slug or "agent"
 
 
+def _build_agent_config(agent: Agent, org_secrets: dict[str, str]) -> dict:
+    """
+    Build the ``AgentConfig`` payload the pipeline service's ``POST /sessions``
+    expects (``services/pipeline/schemas.py::AgentConfig``).
+
+    Shared by every call-initiating path (WebRTC, Twilio inbound, Twilio
+    outbound) so they all send an identical, schema-correct payload instead
+    of each path hand-rolling its own (slightly different, and in Twilio's
+    case previously-incompatible) shape.
+    """
+    return {
+        "agent_id": str(agent.id),
+        "organization_id": str(agent.org_id),
+        "name": agent.name,
+        "agent_type": agent.agent_type,
+        "llm_model": agent.llm_model,
+        "system_prompt": agent.system_prompt or "",
+        "temperature": float(agent.temperature) if agent.temperature is not None else 0.7,
+        "max_tokens": agent.max_tokens or 512,
+        "tools_json": agent.tools_json,
+        "org_secrets": org_secrets,
+        "language": agent.language,
+        "tts_voice": agent.tts_voice,
+        "tts_speed": float(agent.tts_speed) if agent.tts_speed is not None else 1.0,
+        "vad_threshold": float(agent.vad_threshold) if agent.vad_threshold is not None else 0.5,
+        "min_speech_ms": agent.min_speech_ms or 250,
+        "silence_ms": agent.silence_ms or 700,
+        "qdrant_collection": agent.qdrant_collection,
+        "rag_top_k": agent.rag_top_k or 3,
+        "noise_removal_level": agent.noise_removal_level or "rnnoise",
+        "allow_interruptions": bool(agent.allow_interruptions),
+    }
+
+
 def _latency_stats(
     avg: float | None,
     p50: float | None,
@@ -109,8 +151,9 @@ def _latency_stats(
 
 
 class AgentService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, redis=None) -> None:
         self.session = session
+        self.redis = redis
         self.repo = AgentRepository(session)
         self.phone_repo = AgentPhoneNumberRepository(session)
         self._audit = AuditService(session)
@@ -131,6 +174,18 @@ class AgentService:
             raise ConflictException(
                 f"An agent with slug '{slug}' already exists in this organisation"
             )
+
+        # ── Plan limit: max agents per org ─────────────────────────────────
+        if self.redis is not None:
+            feature_svc = FeatureService(self.session, self.redis)
+            result = await feature_svc.check(org_id, "ai.agents.max")
+            if result.enabled and result.limit:
+                _, existing_count = await self.repo.list_by_org(org_id, limit=1, offset=0)
+                if existing_count >= result.limit:
+                    raise ForbiddenException(
+                        f"Agent limit reached ({result.limit} agents on your plan). "
+                        "Upgrade your plan or archive an existing agent to continue."
+                    )
 
         agent = await self.repo.create(
             org_id=org_id,
@@ -367,6 +422,37 @@ class AgentService:
         rows = await self.phone_repo.list_by_agent(agent_id)
         return [AgentPhoneNumberResponse.model_validate(r) for r in rows]
 
+    async def unassign_phone_number(
+        self,
+        agent_id: UUID,
+        org_id: UUID,
+        phone_number_id: UUID,
+        actor: User | None = None,
+    ) -> None:
+        agent = await self.repo.get_by_id_and_org(agent_id, org_id)
+        if not agent:
+            raise NotFoundException(f"Agent {agent_id} not found")
+        pn = await self.phone_repo.get_by_id_and_agent(phone_number_id, agent_id)
+        if not pn:
+            raise NotFoundException(
+                f"Phone number {phone_number_id} is not assigned to agent {agent_id}"
+            )
+        await self.phone_repo.delete(phone_number_id)
+        logger.info(
+            "agent.phone_number_unassigned",
+            agent_id=str(agent_id),
+            phone=pn.phone_number,
+        )
+        await self._audit.log(
+            action="agent.phone_number_unassigned",
+            resource_type="agent",
+            resource_id=str(agent_id),
+            org_id=org_id,
+            actor_user_id=actor.id if actor else None,
+            old_values={"phone_number": pn.phone_number},
+            description=f"Unassigned phone number {pn.phone_number} from agent {agent_id}",
+        )
+
     # ── Test call ──────────────────────────────────────────────────────────
 
     async def test_call(self, agent_id: UUID, org_id: UUID) -> TestCallResponse:
@@ -439,31 +525,29 @@ class AgentService:
             # pynvml unavailable or no GPU — proceed without blocking
             pass
 
+        # ── Plan limits: call-minute quota + concurrent-call slot ──────────────
+        # Reserve the slot before touching the pipeline so two simultaneous
+        # connect attempts can't both slip past the cap; released in the
+        # `finally` below if session creation fails, or by write_call_log
+        # when the pipeline reports the call as finished.
+        credit_svc = CallCreditService(self.session, self.redis) if self.redis is not None else None
+        slot_acquired = False
+        if credit_svc is not None:
+            usage = await credit_svc.get_usage(org_id)
+            if usage.allowed_minutes is not None and usage.used_minutes >= usage.allowed_minutes:
+                raise ForbiddenException(
+                    f"Monthly call-minute limit reached ({usage.allowed_minutes} min/month). "
+                    "Upgrade your plan to continue."
+                )
+            await credit_svc.acquire_call_slot(org_id)
+            slot_acquired = True
+
         settings = get_settings()
         pipeline_url: str = getattr(
             settings, "PIPELINE_SERVICE_URL", "http://localhost:7000"
         )
-
-        agent_config = {
-            "agent_id": str(agent.id),
-            "organization_id": str(agent.org_id),
-            "name": agent.name,
-            "agent_type": agent.agent_type,
-            "llm_model": agent.llm_model,
-            "system_prompt": agent.system_prompt or "",
-            "temperature": float(agent.temperature) if agent.temperature is not None else 0.7,
-            "max_tokens": agent.max_tokens or 512,
-            "tts_voice": agent.tts_voice,
-            "tts_speed": float(agent.tts_speed) if agent.tts_speed is not None else 1.0,
-            "vad_threshold": float(agent.vad_threshold) if agent.vad_threshold is not None else 0.5,
-            "min_speech_ms": agent.min_speech_ms or 250,
-            "silence_ms": agent.silence_ms or 700,
-            "allow_interruptions": bool(agent.allow_interruptions),
-            "qdrant_collection": agent.qdrant_collection,
-            "rag_top_k": agent.rag_top_k or 3,
-            "tools_json": agent.tools_json,
-            "noise_removal_level": agent.noise_removal_level or "rnnoise",
-        }
+        org_secrets = await OrgSecretsService(self.session).get_decrypted(org_id)
+        agent_config = _build_agent_config(agent, org_secrets)
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -490,14 +574,20 @@ class AgentService:
                 r_offer.raise_for_status()
                 answer = r_offer.json()
         except httpx.ConnectError as exc:
+            if slot_acquired:
+                await credit_svc.release_call_slot(org_id)
             raise ConflictException(
                 f"Pipeline service unavailable at {pipeline_url}"
             ) from exc
         except httpx.HTTPStatusError as exc:
+            if slot_acquired:
+                await credit_svc.release_call_slot(org_id)
             status = exc.response.status_code
             detail = f"Pipeline error {status}: {exc.response.text[:200]}"
             raise ConflictException(detail) from exc
         except httpx.TimeoutException as exc:
+            if slot_acquired:
+                await credit_svc.release_call_slot(org_id)
             raise ConflictException("Pipeline service timed out") from exc
 
         ice_servers: list[dict] = answer.get(
@@ -534,6 +624,20 @@ class CallLogService:
     # ── Write (called by pipeline after session ends) ──────────────────────
 
     async def write_call_log(self, data: WriteCallLogRequest) -> CallLogResponse:
+        # ── Tenant-binding check ────────────────────────────────────────────
+        # This endpoint has no org-context header (the pipeline service calls
+        # it with org_id/agent_id straight from the agent config it was given
+        # at session start), so nothing upstream guarantees the two IDs in the
+        # request body actually belong together. Without this check, any
+        # caller holding the internal `agents.call_log.create` permission
+        # could attribute a call to a different org's agent — corrupting that
+        # org's analytics/billing with a record it never generated.
+        owning_agent = await self.agent_repo.get_by_id_and_org(data.agent_id, data.org_id)
+        if owning_agent is None:
+            raise NotFoundException(
+                f"Agent {data.agent_id} does not belong to organisation {data.org_id}"
+            )
+
         # ── PII detection ───────────────────────────────────────────────────
         # Flag phone numbers, emails, credit cards and SSNs in the transcript.
         # Flags are persisted in metadata_ — original PII is never re-extracted.
@@ -624,6 +728,46 @@ class CallLogService:
                     call_id=log.id,
                     reason=status_str,
                 )
+
+            # ── Release concurrency slot + deduct call-minute credits ─────
+            # The slot was acquired at session start (webrtc_connect /
+            # TwilioCallService); this is the one place every transport's
+            # call eventually reports completion, so it is the single
+            # release point. "connected" is a live, non-terminal status —
+            # no release/deduction happens until the call actually ends.
+            if status_str in ("completed", "failed", "no-answer"):
+                from app.modules.agents.events import (
+                    publish_limit_exceeded,
+                    publish_limit_warning,
+                )
+
+                credit_svc = CallCreditService(self.session, self.redis)
+                await credit_svc.release_call_slot(data.org_id)
+
+                try:
+                    await credit_svc.check_and_deduct(data.org_id, data.duration_sec or 0)
+                except ForbiddenException:
+                    # The call already happened — there's nothing to block
+                    # retroactively. Recording usage (above) still pushes the
+                    # org over quota so the *next* call attempt is blocked.
+                    pass
+
+                usage = await credit_svc.get_usage(data.org_id)
+                if usage.allowed_minutes:
+                    percent_used = usage.used_minutes / usage.allowed_minutes * 100
+                    if percent_used >= 100:
+                        await publish_limit_exceeded(
+                            self.session, self.redis,
+                            org_id=data.org_id,
+                            agent_id=data.agent_id,
+                        )
+                    elif percent_used >= 80:
+                        await publish_limit_warning(
+                            self.session, self.redis,
+                            org_id=data.org_id,
+                            agent_id=data.agent_id,
+                            percent_used=percent_used,
+                        )
         return CallLogResponse.model_validate(log)
 
     # ── Read ───────────────────────────────────────────────────────────────
@@ -652,6 +796,39 @@ class CallLogService:
         offset = (page - 1) * page_size
         rows, total = await self.repo.list_by_agent(
             agent_id, org_id, status=status, limit=limit, offset=offset
+        )
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        return CallLogListResponse(
+            calls=[CallLogResponse.model_validate(r) for r in rows],
+            pagination=PaginationMeta(
+                page=page,
+                page_size=page_size,
+                total_items=total,
+                total_pages=total_pages,
+                has_next=page < total_pages,
+                has_previous=page > 1,
+            ),
+        )
+
+    async def list_calls_for_org(
+        self,
+        org_id: UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        status: str | None = None,
+        agent_id: UUID | None = None,
+    ) -> CallLogListResponse:
+        """Org-wide call history across every agent — backs the global calls page."""
+        if agent_id is not None:
+            agent = await self.agent_repo.get_by_id_and_org(agent_id, org_id)
+            if not agent:
+                raise NotFoundException(f"Agent {agent_id} not found")
+
+        limit = page_size
+        offset = (page - 1) * page_size
+        rows, total = await self.repo.list_by_org(
+            org_id, status=status, agent_id=agent_id, limit=limit, offset=offset
         )
         total_pages = math.ceil(total / page_size) if page_size else 1
         return CallLogListResponse(
@@ -728,20 +905,49 @@ class CallLogService:
         self, call_id: UUID, org_id: UUID
     ) -> RecordingUrlResponse:
         """
-        Return a presigned URL for the call recording stored in MinIO/S3.
+        Return a presigned URL for the call recording stored in MinIO.
 
-        Full MinIO SDK presign integration would live here. For now we return
-        the stored URL with a 1-hour expiry so the contract is met.
+        ``CallLog.recording_url`` actually stores the MinIO *object key*
+        (``{org_id}/{date}/{call_id}/{session_id}.wav`` — see
+        ``services/pipeline/call_recorder.py::_s3_key``), not a URL. We
+        presign it against the same endpoint/bucket the pipeline uploaded to
+        so the link expires after 1 hour instead of granting indefinite access.
         """
-        log = await self.repo.get_by_id_and_org(call_id, org_id)
-        if not log:
+        call_log = await self.repo.get_by_id_and_org(call_id, org_id)
+        if not call_log:
             raise NotFoundException(f"Call {call_id} not found")
-        if not log.recording_url:
+        if not call_log.recording_url:
             raise NotFoundException(f"No recording available for call {call_id}")
 
-        expires_at = datetime.now(UTC) + timedelta(hours=1)
-        # TODO: generate MinIO presigned URL using minio-py when integrated
-        return RecordingUrlResponse(url=log.recording_url, expires_at=expires_at)
+        settings = get_settings()
+        expires_seconds = 3600
+        try:
+            import aioboto3
+
+            session = aioboto3.Session()
+            async with session.client(
+                "s3",
+                endpoint_url=settings.MINIO_ENDPOINT,
+                aws_access_key_id=settings.MINIO_ACCESS_KEY,
+                aws_secret_access_key=settings.MINIO_SECRET_KEY,
+            ) as s3:
+                url: str = await s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": settings.MINIO_BUCKET, "Key": call_log.recording_url},
+                    ExpiresIn=expires_seconds,
+                )
+        except Exception as exc:
+            logger.error(
+                "call.recording_presign_failed",
+                call_id=str(call_id),
+                error=str(exc),
+            )
+            raise ConflictException(
+                "Recording storage is temporarily unavailable. Try again shortly."
+            ) from exc
+
+        expires_at = datetime.now(UTC) + timedelta(seconds=expires_seconds)
+        return RecordingUrlResponse(url=url, expires_at=expires_at)
 
 
 # ── Twilio PSTN service ───────────────────────────────────────────────────────
@@ -758,8 +964,9 @@ class TwilioCallService:
     * Initiate outbound calls via the Twilio REST API.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, redis=None) -> None:
         self.session = session
+        self.redis = redis
         self.settings = get_settings()
         self._phone_repo = AgentPhoneNumberRepository(session)
         self._agent_repo = AgentRepository(session)
@@ -863,21 +1070,48 @@ class TwilioCallService:
             org_id = raw.org_id
 
         agent = await self._agent_repo.get_by_id_and_org(phone_rec.agent_id, org_id)
-        if not agent or not agent.is_active:
+        if not agent or agent.status != "active":
             root = ET.Element("Response")
             ET.SubElement(root, "Hangup")
             return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
                 root, encoding="unicode"
             )
 
-        session_id = await self._create_pipeline_session(agent, call_sid, from_number)
+        # ── Plan limits: call-minute quota + concurrent-call slot ──────────
+        # Twilio gives the caller nothing useful to retry with on a 4xx, so
+        # reject quietly with a spoken message rather than raising — this is
+        # a webhook response, not an API call a client can catch.
+        if self.redis is not None:
+            credit_svc = CallCreditService(self.session, self.redis)
+            try:
+                usage = await credit_svc.get_usage(org_id)
+                if usage.allowed_minutes is not None and usage.used_minutes >= usage.allowed_minutes:
+                    raise ForbiddenException("monthly limit reached")
+                await credit_svc.acquire_call_slot(org_id)
+            except ForbiddenException:
+                root = ET.Element("Response")
+                ET.SubElement(root, "Say").text = (
+                    "This service is temporarily at capacity. Please try again later."
+                )
+                ET.SubElement(root, "Hangup")
+                return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+                    root, encoding="unicode"
+                )
+
+        try:
+            session_id = await self._create_pipeline_session(agent, call_sid, from_number)
+        except Exception:
+            if self.redis is not None:
+                await CallCreditService(self.session, self.redis).release_call_slot(org_id)
+            raise
 
         await self._audit.log(
             action="twilio.inbound_call",
             resource_type="agent",
             resource_id=str(agent.id),
             org_id=org_id,
-            metadata={"call_sid": call_sid, "from": from_number, "session_id": session_id},
+            actor_type="system",
+            new_values={"call_sid": call_sid, "from": from_number, "session_id": session_id},
         )
 
         self.log.info(
@@ -912,7 +1146,7 @@ class TwilioCallService:
         agent = await self._agent_repo.get_by_id_and_org(agent_id, org_id)
         if not agent:
             raise NotFoundException(f"Agent {agent_id} not found")
-        if not agent.is_active:
+        if agent.status != "active":
             raise ConflictException("Agent is not active")
 
         # Resolve caller-ID
@@ -923,34 +1157,52 @@ class TwilioCallService:
                 raise ConflictException("Agent has no assigned phone numbers")
             from_number = numbers[0].phone_number
 
+        # ── Plan limits: call-minute quota + concurrent-call slot ──────────
+        credit_svc = CallCreditService(self.session, self.redis) if self.redis is not None else None
+        slot_acquired = False
+        if credit_svc is not None:
+            usage = await credit_svc.get_usage(org_id)
+            if usage.allowed_minutes is not None and usage.used_minutes >= usage.allowed_minutes:
+                raise ForbiddenException(
+                    f"Monthly call-minute limit reached ({usage.allowed_minutes} min/month). "
+                    "Upgrade your plan to continue."
+                )
+            await credit_svc.acquire_call_slot(org_id)
+            slot_acquired = True
+
         # Create pipeline session before dialling so the WS endpoint exists
         # before Twilio connects to it.
-        session_id = await self._create_pipeline_session(
-            agent,
-            call_sid="pending",
-            from_number=data.to_number,
-            metadata={"direction": "outbound", **data.metadata},
-        )
+        try:
+            session_id = await self._create_pipeline_session(
+                agent,
+                call_sid="pending",
+                from_number=data.to_number,
+                metadata={"direction": "outbound", **data.metadata},
+            )
 
-        connect_url = self._twiml_connect_callback(session_id)
+            connect_url = self._twiml_connect_callback(session_id)
 
-        client = _TwilioClient(
-            self.settings.TWILIO_ACCOUNT_SID,
-            self.settings.TWILIO_AUTH_TOKEN,
-        )
-        call = client.calls.create(
-            to=data.to_number,
-            from_=from_number,
-            url=connect_url,
-        )
+            client = _TwilioClient(
+                self.settings.TWILIO_ACCOUNT_SID,
+                self.settings.TWILIO_AUTH_TOKEN,
+            )
+            call = client.calls.create(
+                to=data.to_number,
+                from_=from_number,
+                url=connect_url,
+            )
+        except Exception:
+            if slot_acquired:
+                await credit_svc.release_call_slot(org_id)
+            raise
 
         await self._audit.log(
             action="twilio.outbound_call",
             resource_type="agent",
             resource_id=str(agent.id),
             org_id=org_id,
-            actor_id=actor_id,
-            metadata={"call_sid": call.sid, "to": data.to_number, "session_id": session_id},
+            actor_user_id=actor_id,
+            new_values={"call_sid": call.sid, "to": data.to_number, "session_id": session_id},
         )
 
         self.log.info(
@@ -975,21 +1227,25 @@ class TwilioCallService:
         from_number: str,
         metadata: dict | None = None,
     ) -> str:
-        """POST /sessions to the pipeline service and return the session_id."""
+        """
+        POST /sessions to the pipeline service and return the session_id.
+
+        Sends the same ``agent_config`` shape as WebRTC's
+        ``AgentService.webrtc_connect`` (see ``_build_agent_config``) — the
+        pipeline's ``POST /sessions`` expects a nested ``AgentConfig``
+        object, not the flat camelCase fields this previously sent, which
+        meant every Twilio call failed at this step before this fix.
+        """
+        org_secrets = await OrgSecretsService(self.session).get_decrypted(agent.org_id)
         payload: dict = {
-            "agentId": str(agent.id),
-            "systemPrompt": agent.system_prompt or "",
-            "voiceId": agent.voice_id or "alloy",
-            "language": agent.language or "en",
-            "transport": "twilio",
+            "agent_config": _build_agent_config(agent, org_secrets),
+            "call_id": None,
             "metadata": {
-                "callSid": call_sid,
-                "callerNumber": from_number,
+                "call_sid": call_sid,
+                "caller_number": from_number,
                 **(metadata or {}),
             },
         }
-        if agent.tools_json:
-            payload["tools"] = agent.tools_json
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(

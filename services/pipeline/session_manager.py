@@ -299,20 +299,25 @@ class SessionManager:
             return
 
         # ── Concurrency gate ─────────────────────────────────────────────────
-        active_running = sum(
-            1 for s in self._sessions.values()
-            if s.info.status == "active"
-        )
-        if active_running >= self.MAX_CONCURRENT_CALLS:
-            log.warning(
-                "session_capacity_reached",
-                active=active_running,
-                max=self.MAX_CONCURRENT_CALLS,
-                session_id=session_id,
+        # The count-active / set-active sequence must be atomic — otherwise
+        # two concurrent admissions can both pass the check before either
+        # flips status to "active", exceeding MAX_CONCURRENT_CALLS. The lock
+        # is held only across this decision, not across pipeline execution.
+        async with self._lock:
+            active_running = sum(
+                1 for s in self._sessions.values()
+                if s.info.status == "active"
             )
-            return
+            if active_running >= self.MAX_CONCURRENT_CALLS:
+                log.warning(
+                    "session_capacity_reached",
+                    active=active_running,
+                    max=self.MAX_CONCURRENT_CALLS,
+                    session_id=session_id,
+                )
+                return
+            state.info.status = "active"
 
-        state.info.status = "active"
         config = state.config
         transport = state.webrtc_transport
 
@@ -433,11 +438,21 @@ class SessionManager:
 
         # ── Concurrency gate ──────────────────────────────────────────────────
         # Count only *active* (pipeline-running) sessions, not idle/ended ones.
-        active_running = sum(
-            1 for s in self._sessions.values()
-            if s.info.status == "active"
-        )
-        if active_running >= self.MAX_CONCURRENT_CALLS:
+        # Hold the lock across the count-and-admit decision only, so two
+        # concurrent connection attempts can't both pass the check before
+        # either flips status to "active" (TOCTOU on MAX_CONCURRENT_CALLS).
+        async with self._lock:
+            active_running = sum(
+                1 for s in self._sessions.values()
+                if s.info.status == "active"
+            )
+            if active_running >= self.MAX_CONCURRENT_CALLS:
+                admitted = False
+            else:
+                state.info.status = "active"
+                admitted = True
+
+        if not admitted:
             log.warning(
                 "session_capacity_reached",
                 active=active_running,
@@ -447,7 +462,6 @@ class SessionManager:
             await _send_busy_response(ws)
             return
 
-        state.info.status = "active"
         config = state.config
 
         # ── Build transport + pipeline ─────────────────────────────────
@@ -568,12 +582,20 @@ class SessionManager:
             await ws.close(code=4404)
             return
 
-        # Concurrency gate
-        active_running = sum(
-            1 for s in self._sessions.values()
-            if s.info.status == "active"
-        )
-        if active_running >= self.MAX_CONCURRENT_CALLS:
+        # Concurrency gate — see run_ws() for why the count-and-admit
+        # decision must happen atomically under self._lock.
+        async with self._lock:
+            active_running = sum(
+                1 for s in self._sessions.values()
+                if s.info.status == "active"
+            )
+            if active_running >= self.MAX_CONCURRENT_CALLS:
+                admitted = False
+            else:
+                state.info.status = "active"
+                admitted = True
+
+        if not admitted:
             log.warning(
                 "twilio_capacity_reached",
                 active=active_running,
@@ -584,7 +606,6 @@ class SessionManager:
             await ws.close(code=1013)  # 1013 = Try Again Later
             return
 
-        state.info.status = "active"
         config = state.config
 
         # ── Build transport ───────────────────────────────────────────────

@@ -69,9 +69,11 @@ from app.modules.agents.schemas import (
     KbDeleteDocResponse,
     KbDocumentListResponse,
     KbUploadResponse,
+    OrgSecretListResponse,
     OutboundCallRequest,
     OutboundCallResponse,
     RecordingUrlResponse,
+    SetOrgSecretRequest,
     TestCallResponse,
     UpdateAgentRequest,
     UpdatePromptRequest,
@@ -82,6 +84,7 @@ from app.modules.agents.schemas import (
 )
 from app.modules.agents.service import AgentService, CallLogService, TwilioCallService
 from app.modules.agents.kb_service import KnowledgeBaseService
+from app.modules.agents.secrets_service import OrgSecretsService
 from app.core.security.twilio_guard import TwilioSigned
 
 router = APIRouter()
@@ -121,6 +124,7 @@ async def create_agent(
     actor: AgentCreateUser,
     org_id: OrgID,
     db: DB,
+    redis: Redis,
     _feat: None = require_feature("ai.agents.create"),
 ) -> AgentResponse:
     """
@@ -129,7 +133,7 @@ async def create_agent(
     The ``slug`` field must be unique within the organisation; if omitted it
     is auto-generated from the agent name.
     """
-    svc = AgentService(db)
+    svc = AgentService(db, redis)
     return await svc.create_agent(org_id, actor, body)
 
 
@@ -262,6 +266,7 @@ async def webrtc_connect(
     actor: AgentReadUser,
     org_id: OrgID,
     db: DB,
+    redis: Redis,
     _feat: None = require_feature("ai.webrtc.enabled"),
 ) -> WebRTCConnectResponse:
     """
@@ -279,7 +284,7 @@ async def webrtc_connect(
 
     Returns the SDP answer and an ICE server list.
     """
-    svc = AgentService(db)
+    svc = AgentService(db, redis)
     return await svc.webrtc_connect(agent_id, org_id, body)
 
 
@@ -368,6 +373,24 @@ async def list_phone_numbers(
     return await svc.list_phone_numbers(agent_id, org_id)
 
 
+@router.delete(
+    "/agents/{agent_id}/phone-numbers/{phone_number_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Unassign phone number",
+    tags=["Agents"],
+)
+async def unassign_phone_number(
+    agent_id: UUID,
+    phone_number_id: UUID,
+    actor: AgentUpdateUser,
+    org_id: OrgID,
+    db: DB,
+) -> None:
+    """Remove a phone number assignment from the agent."""
+    svc = AgentService(db)
+    await svc.unassign_phone_number(agent_id, org_id, phone_number_id, actor=actor)
+
+
 # ── Knowledge base ───────────────────────────────────────────────────────────
 
 
@@ -383,6 +406,7 @@ async def upload_knowledge_base(
     actor: AgentUpdateUser,
     org_id: OrgID,
     db: DB,
+    redis: Redis,
     file: UploadFile = File(..., description="Document to ingest (PDF, DOCX, TXT, MD, CSV)"),
     source_url: str | None = Query(default=None, description="Source URL for url/youtube types"),
     _feat: None = require_feature("ai.rag.enabled"),
@@ -396,7 +420,7 @@ async def upload_knowledge_base(
 
     Supported formats: `pdf`, `docx`, `txt`, `md`, `csv`, `url`, `youtube`.
     """
-    svc = KnowledgeBaseService(db)
+    svc = KnowledgeBaseService(db, redis)
     return await svc.upload_document(
         agent_id=agent_id,
         org_id=org_id,
@@ -594,6 +618,74 @@ async def agent_analytics(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ORG SECRETS (tool-executor credentials — SQL DSNs, API keys)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Admin-only (``agents.admin.models``): these secrets are shared across every
+# agent in the org and substituted into tool executor templates at call time
+# (see services/pipeline/processors/executors.py). Values are write-only —
+# no endpoint here ever returns a secret's value, only its key name.
+
+OrgSecretsAdminUser = Annotated[User, require("agents.admin.models")]
+
+
+@router.put(
+    "/agents/org-secrets",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Set an org-level tool-executor secret",
+    tags=["Agents"],
+)
+async def set_org_secret(
+    body: SetOrgSecretRequest,
+    actor: OrgSecretsAdminUser,
+    org_id: OrgID,
+    db: DB,
+) -> None:
+    """
+    Store an encrypted secret for use by SQL/HTTP tool executors.
+
+    Reference it from a tool's ``executor`` config as ``{KEY}`` — the
+    decrypted value is attached to the pipeline session payload at call
+    start and never appears in ``tools_json`` or any API response.
+    """
+    svc = OrgSecretsService(db)
+    await svc.set_secret(org_id, body.key, body.value)
+
+
+@router.get(
+    "/agents/org-secrets",
+    response_model=OrgSecretListResponse,
+    summary="List org-level tool-executor secret names",
+    tags=["Agents"],
+)
+async def list_org_secrets(
+    actor: OrgSecretsAdminUser,
+    org_id: OrgID,
+    db: DB,
+) -> OrgSecretListResponse:
+    """Return configured secret *names* only — values are never returned."""
+    svc = OrgSecretsService(db)
+    keys = await svc.list_keys(org_id)
+    return OrgSecretListResponse(keys=keys)
+
+
+@router.delete(
+    "/agents/org-secrets/{key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an org-level tool-executor secret",
+    tags=["Agents"],
+)
+async def delete_org_secret(
+    key: str,
+    actor: OrgSecretsAdminUser,
+    org_id: OrgID,
+    db: DB,
+) -> None:
+    svc = OrgSecretsService(db)
+    await svc.delete_secret(org_id, key)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # CALL ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -605,10 +697,37 @@ async def agent_analytics(
     summary="Write call log",
     tags=["Calls"],
 )
+@router.get(
+    "/calls",
+    response_model=CallLogListResponse,
+    summary="List calls (org-wide)",
+    tags=["Calls"],
+)
+async def list_calls(
+    actor: CallLogReadUser,
+    org_id: OrgID,
+    db: DB,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    status_filter: str | None = Query(default=None, alias="status"),
+    agent_id: UUID | None = Query(default=None),
+) -> CallLogListResponse:
+    """Paginated call history across every agent in the organisation."""
+    svc = CallLogService(db)
+    return await svc.list_calls_for_org(
+        org_id,
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+        agent_id=agent_id,
+    )
+
+
 async def write_call_log(
     body: WriteCallLogRequest,
     actor: CallLogWriteUser,
     db: DB,
+    redis: Redis,
 ) -> CallLogResponse:
     """
     Called by the pipeline service at the end of every session.
@@ -616,7 +735,7 @@ async def write_call_log(
     Persists the call record including latency metrics, transcript, and any
     recording URL.  No org-context header required — org_id is in the body.
     """
-    svc = CallLogService(db)
+    svc = CallLogService(db, redis)
     return await svc.write_call_log(body)
 
 
@@ -671,6 +790,7 @@ async def twilio_inbound_webhook(
     phone_number: str,
     request: Request,
     db: DB,
+    redis: Redis,
     _sig: TwilioSigned,
 ) -> Response:
     """
@@ -682,7 +802,7 @@ async def twilio_inbound_webhook(
     if the signature is absent or invalid.  This replaces the previous
     optional-token check and makes validation mandatory in all environments.
     """
-    svc = TwilioCallService(db)
+    svc = TwilioCallService(db, redis)
 
     # Starlette caches the form after the TwilioSigned dependency reads it
     form = await request.form()
@@ -737,6 +857,7 @@ async def start_outbound_call(
     actor: Annotated[User, require("agents.agent.read")],
     org_id: OrgID,
     db: DB,
+    redis: Redis,
     _feature: None = require_feature("ai.pstn.enabled"),
 ) -> OutboundCallResponse:
     """
@@ -748,7 +869,7 @@ async def start_outbound_call(
     Returns the Twilio ``CallSid``, pipeline ``session_id``, and the
     caller-ID used so the client can track or cancel the call.
     """
-    svc = TwilioCallService(db)
+    svc = TwilioCallService(db, redis)
     return await svc.start_outbound_call(
         agent_id=agent_id,
         org_id=org_id,

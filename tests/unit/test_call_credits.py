@@ -217,3 +217,166 @@ class TestResetUsage:
         await svc.reset_usage(org_id)
         usage = await svc.get_usage(org_id)
         assert usage.used_minutes == 0
+
+
+# ── check_and_deduct / acquire_call_slot — "not enabled" must block ───────────
+#
+# Regression test for a bug the audit flagged: _get_allowed() collapses
+# "feature not enabled on this plan" and "enabled with an explicit 0 =
+# unlimited" to the same return value (0), which is correct for display
+# (get_usage) but was previously being reused directly as the enforcement
+# decision too — silently granting unlimited free minutes/calls to a plan
+# that doesn't include the feature at all. check_and_deduct/acquire_call_slot
+# now check `result.enabled` directly instead of going through that helper.
+
+class TestFeatureNotEnabledBlocks:
+    @pytest.mark.asyncio
+    async def test_check_and_deduct_raises_when_feature_disabled(self):
+        from app.core.exceptions import ForbiddenException
+
+        org_id = uuid4()
+        # feature_limit=-1 → _make_svc sets enabled=False
+        svc, redis = _make_svc(redis_get_return=b"0", feature_limit=-1)
+        with pytest.raises(ForbiddenException):
+            await svc.check_and_deduct(org_id, duration_seconds=60)
+        redis.incrby.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_acquire_call_slot_raises_when_feature_disabled(self):
+        from app.core.exceptions import ForbiddenException
+
+        org_id = uuid4()
+        svc, redis = _make_svc(feature_limit=-1)
+        redis.incr = AsyncMock(return_value=1)
+        redis.decr = AsyncMock(return_value=0)
+        with pytest.raises(ForbiddenException):
+            await svc.acquire_call_slot(org_id)
+        redis.incr.assert_not_called()
+
+
+# ── acquire_call_slot / release_call_slot ──────────────────────────────────────
+#
+# Uses a real in-memory counter (not a fixed-return AsyncMock) so the
+# INCR-then-check-and-compensate logic is exercised for real, including the
+# atomicity property: the counter is only ever adjusted by +1/-1, never
+# read-then-conditionally-written, so a bug that reintroduced a TOCTOU-style
+# "get, then set" race would show up as a wrong final counter value here.
+
+class _FakeCounterRedis:
+    """Minimal stateful fake of the handful of redis-py calls these methods use."""
+
+    def __init__(self) -> None:
+        self._counters: dict[str, int] = {}
+
+    async def incr(self, key: str) -> int:
+        self._counters[key] = self._counters.get(key, 0) + 1
+        return self._counters[key]
+
+    async def decr(self, key: str) -> int:
+        self._counters[key] = self._counters.get(key, 0) - 1
+        return self._counters[key]
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        return True
+
+    async def set(self, key: str, value) -> bool:
+        self._counters[key] = int(value)
+        return True
+
+    async def get(self, key: str):
+        return self._counters.get(key)
+
+
+def _make_slot_svc(limit: int | None):
+    """CallCreditService wired to a real stateful counter + a fixed feature limit."""
+    session = MagicMock()
+    redis = _FakeCounterRedis()
+    from app.modules.features.schemas import FeatureCheckResult
+
+    svc = CallCreditService(session, redis)
+    svc._feature_svc = AsyncMock()
+    svc._feature_svc.check = AsyncMock(
+        return_value=FeatureCheckResult(
+            feature_key="ai.calls.concurrent", enabled=True, limit=limit
+        )
+    )
+    return svc, redis
+
+
+class TestConcurrentCallSlots:
+    @pytest.mark.asyncio
+    async def test_acquire_under_limit_succeeds(self):
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=3)
+        await svc.acquire_call_slot(org_id)
+        await svc.acquire_call_slot(org_id)
+        assert redis._counters[f"active_calls:{org_id}"] == 2
+
+    @pytest.mark.asyncio
+    async def test_acquire_at_limit_raises_and_does_not_leak_the_slot(self):
+        from app.core.exceptions import ForbiddenException
+
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=2)
+        await svc.acquire_call_slot(org_id)
+        await svc.acquire_call_slot(org_id)
+        # Third call is over the cap — must raise AND the counter must be
+        # compensated back down (decremented) rather than left at 3.
+        with pytest.raises(ForbiddenException):
+            await svc.acquire_call_slot(org_id)
+        assert redis._counters[f"active_calls:{org_id}"] == 2
+
+    @pytest.mark.asyncio
+    async def test_release_decrements(self):
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=3)
+        await svc.acquire_call_slot(org_id)
+        await svc.acquire_call_slot(org_id)
+        await svc.release_call_slot(org_id)
+        assert redis._counters[f"active_calls:{org_id}"] == 1
+
+    @pytest.mark.asyncio
+    async def test_release_without_matching_acquire_clamps_to_zero(self):
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=3)
+        await svc.release_call_slot(org_id)
+        assert redis._counters[f"active_calls:{org_id}"] == 0
+
+    @pytest.mark.asyncio
+    async def test_unlimited_when_limit_is_none(self):
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=None)
+        for _ in range(50):
+            await svc.acquire_call_slot(org_id)
+        assert redis._counters[f"active_calls:{org_id}"] == 50
+
+    @pytest.mark.asyncio
+    async def test_unlimited_when_limit_is_zero(self):
+        """limit=0 is the seed-data convention for 'unlimited' (Enterprise plans)."""
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=0)
+        for _ in range(10):
+            await svc.acquire_call_slot(org_id)
+        assert redis._counters[f"active_calls:{org_id}"] == 10
+
+    @pytest.mark.asyncio
+    async def test_full_acquire_release_cycle_matches_actual_concurrency(self):
+        """
+        Simulates 3 calls starting, 1 ending, then a 3rd new call starting —
+        mirrors what webrtc_connect/write_call_log actually do across a
+        call's lifetime and checks the counter always reflects reality.
+        """
+        org_id = uuid4()
+        svc, redis = _make_slot_svc(limit=3)
+        key = f"active_calls:{org_id}"
+
+        await svc.acquire_call_slot(org_id)  # call A starts
+        await svc.acquire_call_slot(org_id)  # call B starts
+        await svc.acquire_call_slot(org_id)  # call C starts
+        assert redis._counters[key] == 3
+
+        await svc.release_call_slot(org_id)  # call A ends
+        assert redis._counters[key] == 2
+
+        await svc.acquire_call_slot(org_id)  # call D starts — should succeed, slot freed
+        assert redis._counters[key] == 3

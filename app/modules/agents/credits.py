@@ -11,11 +11,18 @@ Redis key schema
   call_minutes:{org_id}:{YYYY-MM}   INCRBY duration_seconds
   call_minutes_ttl is set to the first second of next month.
 
-Limit convention (mirrors seed_features_ai.py / FeatureCheckResult)
+Limit convention (mirrors seed_features_ai.py / FeatureCheckResult), for a
+feature the org's plan actually HAS (``result.enabled is True``):
 ──────────────────────────────────────────────────────────────────────
-  None → boolean feature carry-over — treat as unlimited
-  0    → explicitly unlimited
+  None → unlimited
+  0    → explicitly unlimited (seed convention for Enterprise plans)
   N>0  → capped at N minutes per month
+
+If the org's plan does NOT include the feature at all (``result.enabled is
+False``), ``check_and_deduct`` / ``acquire_call_slot`` raise immediately —
+"not enabled" must mean blocked, not unlimited. ``_get_allowed`` (used only
+by ``get_usage`` for dashboard display) still collapses both cases to the
+same return value since a dashboard widget has no "blocked" concept to show.
 """
 
 from __future__ import annotations
@@ -33,6 +40,16 @@ from app.modules.features.service import FeatureService
 
 # Feature keys used by this service
 _MINUTES_FEATURE = "ai.calls.minutes"
+_CONCURRENT_FEATURE = "ai.calls.concurrent"
+
+# Safety-net expiry for the active-call counter: bounds a leaked increment
+# (e.g. the pipeline crashes before ever reporting the call as finished) to
+# at most this many seconds instead of permanently consuming a slot.
+_ACTIVE_CALLS_TTL_SEC = 3600
+
+
+def _active_calls_key(org_id: UUID) -> str:
+    return f"active_calls:{org_id}"
 
 
 class MinutesUsage(NamedTuple):
@@ -94,15 +111,28 @@ class CallCreditService:
         Enforce the monthly limit and record usage.
 
         Raises ``ForbiddenException`` *before* deduction if the call would
-        push the org over its quota.  Pass ``duration_seconds = 0`` to only
-        record a zero-second event (e.g. for failed calls).
+        push the org over its quota, or if the org's plan does not include
+        AI calling at all.  Pass ``duration_seconds = 0`` to only record a
+        zero-second event (e.g. for failed calls).
 
         Thread-safe: INCRBY is atomic in Redis.
         """
         if duration_seconds < 0:
             duration_seconds = 0
 
-        allowed = await self._get_allowed(org_id)
+        # Checked directly against ``result.enabled`` rather than through
+        # ``_get_allowed()``: a plan without this feature must be BLOCKED,
+        # not treated as unlimited. ``_get_allowed()`` collapses "not
+        # enabled" and "enabled with an explicit 0 = unlimited" limit to the
+        # same return value, which is fine for display (get_usage) but would
+        # silently grant free unlimited minutes here if reused directly.
+        result = await self._feature_svc.check(org_id, _MINUTES_FEATURE)
+        if not result.enabled:
+            raise ForbiddenException(
+                "AI calling is not available on your current plan. "
+                "Upgrade to enable it."
+            )
+        allowed = result.limit  # None or 0 => unlimited (seed convention), N>0 => capped
 
         if allowed is not None and allowed > 0:
             # Check whether adding this call would exceed the cap
@@ -133,6 +163,53 @@ class CallCreditService:
         Useful in tests and for admin overrides / plan upgrades.
         """
         await self._redis.delete(_month_key(org_id))
+
+    # ── Concurrent-call slots ────────────────────────────────────────────────
+
+    async def acquire_call_slot(self, org_id: UUID) -> None:
+        """
+        Reserve one concurrent-call slot for *org_id*, enforcing the plan's
+        ``ai.calls.concurrent`` limit.
+
+        Uses an atomic INCR-then-check-and-compensate pattern (rather than a
+        read-then-write check) so two simultaneous call starts cannot both
+        slip past the limit the way a plain "count, then admit" check would.
+        Raises ``ForbiddenException`` if the org is already at its limit, or
+        if the org's plan does not include concurrent AI calling at all (see
+        the comment in ``check_and_deduct`` for why this is checked directly
+        against ``result.enabled`` rather than through ``_get_concurrent_allowed``).
+        """
+        result = await self._feature_svc.check(org_id, _CONCURRENT_FEATURE)
+        if not result.enabled:
+            raise ForbiddenException(
+                "AI calling is not available on your current plan. "
+                "Upgrade to enable it."
+            )
+        allowed = result.limit  # None or 0 => unlimited (seed convention), N>0 => capped
+        key = _active_calls_key(org_id)
+        new_value = await self._redis.incr(key)
+        await self._redis.expire(key, _ACTIVE_CALLS_TTL_SEC)
+
+        if allowed is not None and allowed > 0 and new_value > allowed:
+            await self._redis.decr(key)
+            raise ForbiddenException(
+                f"Concurrent call limit reached ({allowed} simultaneous call"
+                f"{'s' if allowed != 1 else ''} allowed on this plan). "
+                "Try again once an active call ends, or upgrade your plan."
+            )
+
+    async def release_call_slot(self, org_id: UUID) -> None:
+        """
+        Release a previously-acquired concurrent-call slot.
+
+        Safe to call even if ``acquire_call_slot`` was never called for this
+        call (e.g. the call failed before a slot was acquired) — the counter
+        is clamped at zero rather than going negative.
+        """
+        key = _active_calls_key(org_id)
+        new_value = await self._redis.decr(key)
+        if new_value < 0:
+            await self._redis.set(key, 0)
 
     # ── Private helpers ───────────────────────────────────────────────────
 
