@@ -88,6 +88,46 @@ class LatencyResponse(CamelModel):
     generated_at: datetime
 
 
+# ── Date-range analytics page ─────────────────────────────────────────────────
+
+class AnalyticsLatencyPoint(CamelModel):
+    """
+    One time-bucket's combined end-to-end latency (STT+LLM+TTS summed per
+    percentile) for the analytics page's latency-over-time chart — distinct
+    from LatencyBucket, which keeps STT/LLM/TTS as separate series for the
+    dashboard home page's more detailed latency chart.
+    """
+
+    timestamp: str = Field(description="ISO-8601 bucket start time.")
+    p50: float = Field(ge=0.0)
+    p95: float = Field(ge=0.0)
+    p99: float = Field(ge=0.0)
+
+
+class AnalyticsBreakdownPoint(CamelModel):
+    """Per-pipeline-component latency summary for the analytics breakdown chart."""
+
+    component: Literal["STT", "LLM", "TTS"]
+    avg_ms: float = Field(ge=0.0)
+    p95_ms: float = Field(ge=0.0)
+
+
+class DashboardAnalyticsResponse(CamelModel):
+    """
+    Consumed by the dashboard analytics page's date-range view: a latency
+    time series, a per-component breakdown, and overall success/failure
+    rates for the requested window.
+    """
+
+    latency: list[AnalyticsLatencyPoint]
+    breakdown: list[AnalyticsBreakdownPoint]
+    success_rate: float = Field(ge=0.0, le=100.0)
+    failure_rate: float = Field(ge=0.0, le=100.0)
+    total_calls: int = Field(ge=0)
+    from_date: str
+    to_date: str
+
+
 # ── Call volume ───────────────────────────────────────────────────────────────
 
 class CallVolumePoint(CamelModel):

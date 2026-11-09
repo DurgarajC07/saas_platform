@@ -226,7 +226,17 @@ class AgentResponse(CamelModel):
     max_call_duration_sec: int
     record_calls: bool
 
-    metadata: dict[str, Any] = Field(alias="metadata_", default_factory=dict)
+    # `validation_alias` (not plain `alias=`) so this only affects how the
+    # value is READ from the ORM object (whose SQLAlchemy column is named
+    # `metadata_` to avoid colliding with `Base.metadata`) — `alias=` sets
+    # both validation AND serialization alias in Pydantic v2, which meant
+    # this field was shipping to clients as `"metadata_"` on the wire
+    # instead of `"metadata"` (CamelModel's `to_camel` generator would
+    # otherwise have produced the correct `"metadata"` alias on its own,
+    # but an explicit `Field(alias=...)` overrides it for both directions).
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, validation_alias="metadata_"
+    )
 
     created_at: datetime
     updated_at: datetime
@@ -435,7 +445,11 @@ class CallLogResponse(CamelModel):
     llm_ttft_ms: int | None = None
     tts_ttfb_ms: int | None = None
 
-    metadata: dict[str, Any] = Field(alias="metadata_", default_factory=dict)
+    # See the matching comment on AgentResponse.metadata above — same bug,
+    # same fix: validation_alias only, not plain alias=.
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, validation_alias="metadata_"
+    )
     created_at: datetime
 
     model_config = {"from_attributes": True, "populate_by_name": True}

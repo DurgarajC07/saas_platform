@@ -6,6 +6,7 @@ Registered in main.py at prefix /api/v1 so routes resolve to:
   Dashboard (org-scoped analytics)
   ─────────────────────────────────────────────────────────────────────────
   GET  /api/v1/dashboard/overview          Active calls, usage, top agents
+  GET  /api/v1/dashboard/analytics         Date-range latency/breakdown/success-rate
   GET  /api/v1/dashboard/latency           P50/P95/P99 latency last 24 h
   GET  /api/v1/dashboard/call-volume       Call count by hour/day/month
   GET  /api/v1/dashboard/agent-performance Per-agent success rate + latency
@@ -43,6 +44,7 @@ from app.modules.dashboard.schemas import (
     AgentDeepDiveResponse,
     AgentPerformanceResponse,
     CallVolumeResponse,
+    DashboardAnalyticsResponse,
     GPUStatusResponse,
     LatencyResponse,
     ModelBenchmarkRequest,
@@ -94,6 +96,31 @@ async def dashboard_overview(
     """
     svc = DashboardService(db, redis)
     return await svc.overview(org_id)
+
+
+# ── Analytics page (date-range) ────────────────────────────────────────────────
+
+@router.get(
+    "/dashboard/analytics",
+    response_model=DashboardAnalyticsResponse,
+    summary="Date-range analytics: latency, breakdown, success/failure rates",
+    tags=["Dashboard"],
+)
+async def dashboard_analytics(
+    actor: DashReadUser,
+    org_id: OrgID,
+    db: DB,
+    redis: Redis,
+    from_date: str = Query(alias="from", description="YYYY-MM-DD"),
+    to_date: str = Query(alias="to", description="YYYY-MM-DD"),
+) -> DashboardAnalyticsResponse:
+    """
+    Backs the dashboard analytics page's date-range view: a combined
+    latency time series, a per-component (STT/LLM/TTS) breakdown, and
+    overall success/failure rates for the requested window.
+    """
+    svc = DashboardService(db, redis)
+    return await svc.analytics(org_id, from_date, to_date)
 
 
 # ── Latency chart ─────────────────────────────────────────────────────────────

@@ -252,3 +252,109 @@ class TestSidecarRecovery:
         missing = tmp_path / "does_not_exist.mpu.json"
         result = await cr.recover_sidecar_upload(str(missing))
         assert result is None
+
+
+# ── recover_orphaned_recordings() — the actual startup-wired recovery path ────
+
+class TestRecoverOrphanedRecordings:
+    async def test_recovers_orphaned_sidecar_and_cleans_up_pcm(self, monkeypatch, tmp_path):
+        """
+        End-to-end: a crashed CallRecorder's sidecar + orphaned PCM temp
+        files sitting in what recover_orphaned_recordings() scans must get
+        the multipart upload completed and the local files swept up —
+        this is the exact scenario services/pipeline/server.py::lifespan
+        now runs at startup before accepting new calls.
+        """
+        monkeypatch.setattr(cr.tempfile, "gettempdir", lambda: str(tmp_path))
+
+        s3 = _make_mock_s3()
+        _patch_aioboto3(monkeypatch, s3)
+
+        rec = cr.CallRecorder("s8", "c8", "org1")
+        await rec.start()
+        rec.write_inbound(_pcm(20, 1))
+        rec.write_outbound(_pcm(20, 2))
+
+        for _ in range(10):
+            await asyncio.sleep(0.05)
+            if s3.upload_part.await_count:
+                break
+        assert s3.upload_part.await_count >= 1
+
+        # Simulate the crash: cancel the flush task without finish(), and
+        # close the still-open file handles — a real process crash/kill
+        # has the OS do this automatically, which is what actually makes
+        # the orphaned .pcm files deletable by the next process; within
+        # this same test process the handles would otherwise still be
+        # open (Windows refuses to delete an open file; POSIX would allow
+        # it but the fd would still be live), so leaving them open here
+        # would test something a real crash never leaves behind.
+        rec._flush_task.cancel()
+        try:
+            await rec._flush_task
+        except asyncio.CancelledError:
+            pass
+        rec._inbound_fh.close()
+        rec._outbound_fh.close()
+
+        assert os.path.exists(rec._sidecar_path)
+        assert os.path.exists(rec._inbound_path)
+        assert os.path.exists(rec._outbound_path)
+
+        recovered = await cr.recover_orphaned_recordings()
+
+        assert recovered == [rec._key]
+        assert s3.complete_multipart_upload.await_count == 1
+        assert not os.path.exists(rec._sidecar_path)
+        # Orphaned PCM spool files are swept up too — they're unusable
+        # without the sidecar's upload_id/part ETags, which are now gone.
+        assert not os.path.exists(rec._inbound_path)
+        assert not os.path.exists(rec._outbound_path)
+
+    async def test_no_sidecars_returns_empty_list(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cr.tempfile, "gettempdir", lambda: str(tmp_path))
+        result = await cr.recover_orphaned_recordings()
+        assert result == []
+
+    async def test_corrupt_sidecar_is_removed_without_raising(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cr.tempfile, "gettempdir", lambda: str(tmp_path))
+        bad_sidecar = tmp_path / "callrec_x_in_abc.pcm.mpu.json"
+        bad_sidecar.write_text("{not valid json")
+
+        result = await cr.recover_orphaned_recordings()  # must not raise
+
+        assert result == []
+        assert not bad_sidecar.exists()
+
+    async def test_one_bad_sidecar_does_not_block_recovery_of_another(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(cr.tempfile, "gettempdir", lambda: str(tmp_path))
+        s3 = _make_mock_s3()
+        _patch_aioboto3(monkeypatch, s3)
+
+        # A sidecar with a valid upload_id/parts list to recover for real.
+        good_sidecar = tmp_path / "callrec_good_in_1.pcm.mpu.json"
+        good_sidecar.write_text(json.dumps({
+            "bucket": "call-recordings",
+            "key": "org1/2026-01-01/c9/s9.wav",
+            "upload_id": "upload-good",
+            "parts": [{"PartNumber": 2, "ETag": "etag-2", "Length": 40}],
+        }))
+        # A sidecar that raises mid-recovery (simulated via a broken type).
+        bad_sidecar = tmp_path / "callrec_bad_in_1.pcm.mpu.json"
+        bad_sidecar.write_text(json.dumps({
+            "bucket": "call-recordings",
+            "key": "org1/2026-01-01/cX/sX.wav",
+            "upload_id": "upload-bad",
+            "parts": [{"PartNumber": 2, "ETag": "etag-2", "Length": "not-a-number"}],
+        }))
+
+        recovered = await cr.recover_orphaned_recordings()
+
+        assert recovered == ["org1/2026-01-01/c9/s9.wav"]
+        assert not good_sidecar.exists()
+        # The bad one failed (TypeError summing an int + str) but must not
+        # have taken down recovery of the good one, and is left in place
+        # since recover_sidecar_upload only removes it on success.
+        assert bad_sidecar.exists()

@@ -201,23 +201,16 @@ Status legend: `[x]` done · `[~]` partially done (see note) · `[ ]` pending/de
   `frontend/src/pages/calls/index.page.tsx` from its honest-empty-state
   placeholder to a real paginated table, reusing the same `DataTable`
   pattern as the per-agent calls page.
-- [ ] Access/refresh tokens in `localStorage` — **not fixed**, no XSS
-  vector currently exists to exploit it, but it's a landmine for the day one
-  does (e.g. a markdown/HTML transcript renderer). Fixing this properly
-  (httpOnly refresh cookie) touches the whole auth flow (login, refresh,
-  CORS/SameSite) and couldn't be verified end-to-end in this environment
-  (no backend/DB available to run against) — deferred rather than risking
-  an unverified change to the auth path.
-- [ ] Seeded fine-grained permissions (`agents.knowledge_base.*`,
-  `agents.tools.manage`, `agents.call.export`) never used as actual route
-  guards, and `POST /agents/{id}/calls/outbound` still gated by
-  `agents.agent.read` instead of a dedicated start-call permission —
-  **deliberately not changed**: renaming/adding RBAC permission checks
-  without also confirming role-to-permission seed assignments risks locking
-  everyone out of an endpoint. Flagged for a dedicated RBAC-audit pass.
-- [ ] Payment-method collection is still manual-entry (no Stripe Elements —
-  no `@stripe/stripe-js` dependency exists yet). Not revisited — this is a
-  product decision (which payment processor UI to integrate), not a bug.
+- [x] ~~Access/refresh tokens in `localStorage`~~ — **superseded, fixed in
+  the "Third follow-up" section below**: httpOnly refresh cookie, no
+  refresh token in frontend state at all, 5 tests verifying it for real.
+- [x] ~~Seeded fine-grained permissions never used as route guards~~ —
+  **superseded, fixed in the "Third follow-up" section below**:
+  `scripts/seed_roles.py` seeded real role grants first, then 9 routes
+  were switched to their correct granular permissions including a new
+  `agents.call.start`.
+- [x] ~~Payment-method collection is manual-entry~~ — **superseded, fixed
+  in the "Third follow-up" section below**: real Stripe Elements wired up.
 
 ## Real verification round (2026-10-25, follow-up)
 
@@ -569,12 +562,140 @@ run for real and **250/250 tests pass**, including:
 be pinned to an exact tested version (`==0.0.108` is confirmed compatible
 with this codebase's frame imports) rather than left open-ended — as
 written, a fresh `pip install` today silently resolves to an incompatible
-1.14.0 and breaks 4 test files' imports outright. **Not changed in this
-pass** — deliberately: pinning a real production dependency's exact
-version is a decision with consequences for the team's actual Docker
-build, and should be a reviewed choice, not something slipped in at the
-tail of an unrelated verification exercise. Flagging it precisely here
-with the confirmed-compatible version instead.
+1.14.0 and breaks 4 test files' imports outright.
+
+**Fixed in the fifth follow-up** (see below) — pinned to `==0.0.108` with
+a comment explaining exactly why, and re-verified the full pipeline test
+suite + `server.py` import against a fresh install of the pinned version.
+
+## Fifth follow-up (2026-11-09) — the two items left after the fourth
+
+Picked up the two genuinely open items from "Not independently
+re-verified" below.
+
+- [x] **`pipecat-ai` version pin applied.**
+  `services/pipeline/requirements.txt`: `pipecat-ai[silero]>=0.0.55` →
+  `pipecat-ai[silero]==0.0.108`, with a comment recording exactly why
+  (the 1.0.0+ frame rename, confirmed via last session's ~15-version
+  bisection) and what this pin was last verified against (the full
+  250-test pipeline suite). Re-verified from scratch in a clean venv:
+  installed the pinned version + its full dependency tree, imported
+  `server.py` directly (confirms the new `call_recorder` import below
+  doesn't break anything), and ran the complete suite — **254/254 pass**
+  (250 from the fourth follow-up + 4 new tests below). The Dockerfile
+  targets Python 3.11, where this pin's own declared sub-dependencies
+  (`onnxruntime~=1.23.2` etc.) have prebuilt wheels directly — the
+  workaround installs needed in this session's Python-3.14 sandbox are a
+  sandbox-only wrinkle, not something the real build will hit.
+
+- [x] **`recover_sidecar_upload()` wired into an actual recovery path.**
+  Previously a correct, tested, but never-invoked building block — the
+  module docstring said as much. Added
+  `call_recorder.recover_orphaned_recordings()`: scans the OS temp
+  directory at process startup for `callrec_*.mpu.json` sidecars a
+  previous crash left behind, completes each one's multipart upload, and
+  sweeps up the now-unusable orphaned PCM spool files regardless of
+  whether recovery succeeded (a failed recovery can't be retried from raw
+  PCM alone without the sidecar's upload_id/part ETags, which are gone by
+  then). One bad/corrupt sidecar doesn't block recovery of any other.
+  Wired into `services/pipeline/server.py::lifespan`, running **before**
+  the session manager starts accepting new calls — this is specifically
+  so a recovered call's orphaned temp files can never collide with a
+  fresh call's own temp files. Updated the module docstring's two
+  "nothing calls this automatically" notes, since something now does.
+  4 new tests added to `tests/test_call_recorder.py` (now 12 total in
+  that file) covering: full recover-and-cleanup happy path, empty temp
+  dir, a corrupt sidecar removed without crashing, and one bad sidecar
+  not blocking recovery of a good one alongside it — all actually run,
+  not hand-traced (one genuine Windows-specific test bug found and fixed
+  along the way: a simulated "crash" within the same test process still
+  holds the PCM file handles open, which Windows won't let you delete,
+  unlike a real process crash where the OS closes them first — fixed by
+  explicitly closing the handles in the test to accurately simulate that).
+
+## Sixth follow-up (2026-11-09) — live end-to-end testing against a real stack, 7 real bugs found and fixed
+
+With the VC++ Redistributable fix from the fourth follow-up, stood up a full
+real (non-Docker) stack for the first time — portable PostgreSQL 16.4,
+a `fakeredis.TcpFakeServer` standing in for Redis on the real wire protocol,
+and a live `uvicorn` process — and exercised the HTTP API end-to-end with
+`curl.exe` (register → login → create org → create agent → prompt → billing
+→ dashboard → org-secrets), since no browser-automation tool was available
+in this sandbox. This is real request/response testing, not code reading,
+and it surfaced bugs that every prior read-through and unit-test pass had
+missed:
+
+1. **`metadata` field shipped to clients as `"metadata_"` on the wire.**
+   `AgentResponse.metadata` and `CallLogResponse.metadata` used
+   `Field(alias="metadata_")` to read from the ORM's `metadata_` column
+   (named that to avoid colliding with SQLAlchemy's `Base.metadata`). In
+   Pydantic v2, `alias=` sets both the validation alias AND the
+   serialization alias — so the API response key was `"metadata_"`, not
+   `"metadata"`, breaking every frontend consumer of agent/call-log JSON.
+   Fixed by switching both to `validation_alias="metadata_"` alone, which
+   only changes how the value is *read* from the ORM object, not how it's
+   serialized. Verified via a live `GET /agents/{id}` showing `"metadata":{}`
+   on the wire.
+2. **`GET /dashboard/usage` and `GET /dashboard/invoice-preview` (billing
+   router) — `AttributeError: 'User' object has no attribute
+   'organization_id'`.** Both endpoints depended on `current_user` and read
+   `current_user.organization_id`, a field that doesn't exist on the `User`
+   model; every other endpoint in the codebase gets the org id from the
+   `OrgID` dependency instead. Fixed both to take `org_id: OrgID` and pass
+   it straight through.
+3. **Billing service `get_usage()` / `get_invoice_preview()` —
+   `AttributeError: 'BillingService' object has no attribute '_session'` /
+   `'_redis'`.** Wrong attribute names (`self.session` / `self.redis` are
+   the real ones). Fixed in both methods.
+4. **Billing service — `AttributeError: 'SubscriptionRepository' object has
+   no attribute 'get_active'`.** Wrong method name; the real one is
+   `get_active_by_org`. Fixed in both methods (confirmed the correct name
+   against the repository class and its other call sites in the same
+   file).
+5. **`AgentService.get_prompt()` didn't exist; `update_prompt()` returned
+   the wrong schema.** `GET /agents/{id}/prompt` threw `AttributeError`
+   (no such method); `PUT /agents/{id}/prompt` threw
+   `ResponseValidationError` because it returned an `AgentResponse` instead
+   of the declared `AgentPromptResponse`. Added the missing method and
+   fixed the return type/value on the other. Verified via live GET and PUT.
+6. **`GET /dashboard/analytics` didn't exist at all.** The frontend called
+   this route (full TypeScript `AnalyticsResponse` shape already defined
+   client-side) but the backend never implemented it. Added
+   `AnalyticsLatencyPoint` / `AnalyticsBreakdownPoint` /
+   `DashboardAnalyticsResponse` schemas, `DashboardService.analytics()`
+   (reuses the existing `latency_hourly_buckets` / `latency_summary` /
+   `call_volume` repo methods — combines STT+LLM+TTS percentiles by
+   summation for the latency series, uses p50 as an avg proxy for the
+   breakdown series, documented in-code as an approximation), and the
+   router endpoint. Verified the live JSON response matches the frontend's
+   expected shape field-for-field.
+7. **`GET/PUT/DELETE /agents/org-secrets*` completely unreachable —
+   shadowed by `GET /agents/{agent_id}`.** FastAPI/Starlette matches routes
+   in registration order. The three org-secrets endpoints (added in an
+   earlier follow-up) were registered *after* the dynamic
+   `/agents/{agent_id}` route, so any request to the literal path
+   `/agents/org-secrets` matched `get_agent()` first, with `agent_id`
+   bound to the literal string `"org-secrets"` — which then failed UUID
+   validation and returned a misleading `422` ("found `o` at 0") instead
+   of ever reaching the real handler. This is the kind of bug that is
+   essentially invisible to code review (the handlers themselves are
+   correct) and only shows up by actually calling the endpoint. Fixed by
+   moving the entire org-secrets section (header comment, the
+   `OrgSecretsAdminUser` permission alias, and all three endpoint
+   functions) to before `GET /agents/{agent_id}` in
+   `app/modules/agents/router.py`, with a comment explaining why the
+   ordering matters so it doesn't regress. Verified with a full live
+   round-trip: `PUT` a secret (`204`) → `GET` lists it (`200`,
+   `{"keys":["CRM_DB_DSN"]}`) → `DELETE` it (`204`) → `GET` shows it gone
+   (`200`, `{"keys":[]}`) — including with a real generated Fernet key for
+   the encrypt/decrypt path, not just the placeholder key used for earlier
+   routing-only checks.
+
+All seven fixes were verified against the live stack (not just `ast.parse`
+or unit tests) by restarting `uvicorn` after each change and re-exercising
+the affected endpoint(s) with `curl.exe`. No regressions found in
+previously-passing endpoints re-checked along the way (login, org/agent
+CRUD, billing usage after the fix).
 
 ## Root cause of the "no live DB" gap, finally identified (historical — see above for the actual fix)
 
@@ -609,19 +730,19 @@ behind, and nothing system-wide was changed.
 
 ## Not independently re-verified
 
-Both items previously listed here (`alembic upgrade head` against a real
-Postgres; the rest of `services/pipeline/tests/`) were resolved in the
-fourth follow-up above — both now actually executed, not just
-hand-traced. What's left:
+All items previously listed here were resolved: `alembic upgrade head`
+against a real Postgres and the rest of `services/pipeline/tests/` in the
+fourth follow-up; the `pipecat-ai` version pin and wiring
+`recover_sidecar_upload()` into a real startup path in the fifth. What's
+left:
 
 - Frontend was verified via `tsc --noEmit` (zero errors) but not run/clicked
-  through in a browser against a live backend.
-- `services/pipeline/requirements.txt`'s unpinned `pipecat-ai` version —
-  confirmed-exploitable finding, deliberately left for a reviewed decision
-  (see the fourth follow-up for the exact version to pin to).
-- The `recover_sidecar_upload()` crash-recovery primitive the call-recorder
-  agent built is correct and tested in isolation, but nothing calls it from
-  an actual startup/recovery path yet.
+  through in a browser against a live backend. This would need the full
+  stack running (Postgres, Redis, Ollama/Whisper/Kokoro, the FastAPI app,
+  and the Vite dev server) — the heavy ML services in particular aren't
+  realistic to stand up in this sandbox regardless of the VC++ fix, so
+  this one still needs Docker (or an equivalent real environment) rather
+  than another no-Docker workaround.
 
 ## Workstream log
 

@@ -609,15 +609,15 @@ class BillingService:
         """
         from app.modules.agents.credits import CallCreditService
 
-        credit_svc = CallCreditService(self._session, self._redis)
+        credit_svc = CallCreditService(self.session, self.redis)
         usage = await credit_svc.get_usage(org_id)  # MinutesUsage namedtuple
 
-        sub = await self._sub_repo.get_active(org_id)
+        sub = await self._sub_repo.get_active_by_org(org_id)
         plan_name = sub.plan.name if (sub and sub.plan) else "free"
 
         ym = datetime.now(UTC).strftime("%Y-%m")
         cb_key = f"call_minutes:{org_id}:{ym}"
-        raw = await self._redis.get(cb_key)
+        raw = await self.redis.get(cb_key)
         credit_balance = int(raw) if raw else 0
 
         remaining: int | None = None
@@ -648,7 +648,7 @@ class BillingService:
         from decimal import ROUND_HALF_UP
 
         usage_resp = await self.get_usage(org_id)
-        sub = await self._sub_repo.get_active(org_id)
+        sub = await self._sub_repo.get_active_by_org(org_id)
         ym = datetime.now(UTC).strftime("%Y-%m")
 
         line_items: list[InvoiceLineItem] = []

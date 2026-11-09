@@ -34,6 +34,7 @@ import structlog
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
+from call_recorder import recover_orphaned_recordings
 from schemas import AgentConfig, HealthResponse, SessionCreateRequest, SessionInfo, WebRTCAnswerResponse, WebRTCOfferRequest
 from session_manager import SessionManager
 from metrics import init_metrics, get_metrics
@@ -50,6 +51,17 @@ _session_manager: SessionManager | None = None
 async def lifespan(app: FastAPI):
     global _session_manager
     logger.info("pipeline.startup")
+
+    # Finalize any call recordings left mid-upload by a previous crash
+    # before accepting new calls (which would create fresh temp files of
+    # their own) — this is the actual recovery path the call-recorder's
+    # crash-safety design has relied on something calling since it was
+    # built; without this, recover_sidecar_upload() was a correct but
+    # never-invoked building block.
+    recovered = await recover_orphaned_recordings()
+    if recovered:
+        logger.info("pipeline.recordings_recovered", keys=recovered)
+
     _session_manager = SessionManager()
     await _session_manager.startup()
     init_metrics(max_concurrent_calls=SessionManager.MAX_CONCURRENT_CALLS)

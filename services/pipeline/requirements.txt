@@ -6,7 +6,19 @@
 #       mic/speaker I/O.  This container receives audio over WebSocket.
 # webrtc extra (aiortc) is installed separately below because its transitive
 # deps (av, cryptography) need system libs that we install in the Dockerfile.
-pipecat-ai[silero]>=0.0.55
+#
+# Pinned to an EXACT version, not a floor (">=" previously here resolved to
+# whatever is newest on install day). Confirmed by running this repo's own
+# processor/test imports against a bisected range of ~15 published
+# releases: pipecat-ai 1.0.0+ renamed several frame classes this codebase
+# imports directly (e.g. StartInterruptionFrame -> InterruptionFrame,
+# plus a reorganized pipecat.audio.vad module layout), so an unpinned
+# floor silently breaks on a fresh install the moment a 1.x release is
+# current. 0.0.108 is the last 0.0.x release (confirmed: every frame name
+# services/pipeline/processors/*.py imports exists there) and is the
+# version the full services/pipeline/tests/ suite (250 tests) was actually
+# run and verified against.
+pipecat-ai[silero]==0.0.108
 
 # ── WebRTC ─────────────────────────────────────────────────────────────────────
 aiortc>=1.9.0

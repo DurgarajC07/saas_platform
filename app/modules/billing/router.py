@@ -371,7 +371,7 @@ async def razorpay_webhook(request: Request) -> WebhookAckResponse:
 async def get_billing_usage(
     db: DB,
     redis: Redis,
-    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: OrgID,
 ) -> BillingUsageResponse:
     """
     Returns the org’s current-month call-minute usage alongside the plan’s
@@ -381,7 +381,7 @@ async def get_billing_usage(
     from app.modules.billing.providers import get_provider
 
     svc = BillingService(db, redis, get_provider())
-    return await svc.get_usage(current_user.organization_id)
+    return await svc.get_usage(org_id)
 
 
 @router.get(
@@ -392,7 +392,7 @@ async def get_billing_usage(
 async def get_invoice_preview(
     db: DB,
     redis: Redis,
-    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: OrgID,
 ) -> InvoicePreviewResponse:
     """
     Returns an estimated invoice for the current calendar-month period,
@@ -401,4 +401,4 @@ async def get_invoice_preview(
     from app.modules.billing.providers import get_provider
 
     svc = BillingService(db, redis, get_provider())
-    return await svc.get_invoice_preview(current_user.organization_id)
+    return await svc.get_invoice_preview(org_id)

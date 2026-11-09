@@ -62,6 +62,7 @@ from app.modules.agents.schemas import (
     AgentAnalyticsResponse,
     AgentListResponse,
     AgentPhoneNumberResponse,
+    AgentPromptResponse,
     AgentResponse,
     AssignPhoneNumberRequest,
     CallLogListResponse,
@@ -341,18 +342,28 @@ class AgentService:
 
     # ── Prompt / Tools shortcuts ───────────────────────────────────────────
 
+    async def get_prompt(
+        self,
+        agent_id: UUID,
+        org_id: UUID,
+    ) -> AgentPromptResponse:
+        agent = await self.repo.get_by_id_and_org(agent_id, org_id)
+        if not agent:
+            raise NotFoundException(f"Agent {agent_id} not found")
+        return AgentPromptResponse(agent_id=agent.id, system_prompt=agent.system_prompt)
+
     async def update_prompt(
         self,
         agent_id: UUID,
         org_id: UUID,
         data: UpdatePromptRequest,
-    ) -> AgentResponse:
+    ) -> AgentPromptResponse:
         agent = await self.repo.get_by_id_and_org(agent_id, org_id)
         if not agent:
             raise NotFoundException(f"Agent {agent_id} not found")
         updated = await self.repo.update(agent_id, system_prompt=data.system_prompt)
         logger.info("agent.prompt_updated", agent_id=str(agent_id))
-        return AgentResponse.model_validate(updated)
+        return AgentPromptResponse(agent_id=updated.id, system_prompt=updated.system_prompt)
 
     async def update_tools(
         self,

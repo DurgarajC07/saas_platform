@@ -16,9 +16,12 @@ Audio is written incrementally to local temp files as it arrives (bounded
 memory), and — on top of that — a background task periodically uploads the
 audio accumulated since the last flush to MinIO as an S3 **multipart
 upload** part, so a mid-call crash only loses the last ``flush_interval``
-seconds of audio instead of the entire call, PROVIDED the recovery helper
-below is actually run after the crash (nothing in this process does that
-automatically — see "What this does NOT give you" below).
+seconds of audio instead of the entire call. ``recover_orphaned_recordings()``
+runs at process startup (see ``services/pipeline/server.py::lifespan``,
+before the session manager accepts any new calls) and finalizes every
+multipart upload a previous crash left mid-flight, using
+``recover_sidecar_upload()`` under the hood — see "Crash-recovery
+guarantee" below for exactly what is and isn't recovered.
 
 How the WAV-header problem is solved
     A playable WAV needs a 44-byte header that encodes the *total* data
@@ -60,16 +63,18 @@ Crash-recovery guarantee — precisely
     * If the process is killed/crashes mid-call, that sidecar survives on
       disk (as long as the disk itself survives — this is a single-process
       local-disk mechanism, not a distributed one).
-    * Nothing in this module runs automatically on process startup to
-      consume that sidecar. ``recover_sidecar_upload()`` is provided as a
-      building block a startup/ops script COULD call to complete the
-      multipart upload using exactly the parts that made it to MinIO before
-      the crash, synthesizing a correct WAV header for that (truncated)
-      total from the recorded part lengths. Until something calls it, a
-      crash still leaves an **incomplete** multipart upload in MinIO —
-      which is not downloadable as a playable file via the plain S3 API,
-      and should be cleaned up by an S3/MinIO lifecycle rule that aborts
-      incomplete multipart uploads after N days.
+    * ``recover_orphaned_recordings()`` runs automatically at process
+      startup (wired into ``services/pipeline/server.py::lifespan``,
+      before the session manager accepts any new calls) and completes
+      every multipart upload using exactly the parts that made it to
+      MinIO before the crash, synthesizing a correct WAV header for that
+      (truncated) total from the recorded part lengths. If this process
+      is ever run outside that FastAPI app (a standalone script, a
+      different entry point), nothing calls it automatically there — in
+      that case a crash leaves an **incomplete** multipart upload in
+      MinIO, which is not downloadable as a playable file via the plain
+      S3 API, and should be cleaned up by an S3/MinIO lifecycle rule that
+      aborts incomplete multipart uploads after N days.
     * Even when recovered, audio written after the last successful flush
       (up to ``RECORDING_FLUSH_INTERVAL_SECONDS``, default 30s) is lost —
       it only ever existed in the OS temp file / in-memory part buffer,
@@ -641,3 +646,74 @@ async def recover_sidecar_upload(sidecar_path: str) -> str | None:
     except OSError:
         pass
     return key
+
+
+async def recover_orphaned_recordings() -> list[str]:
+    """
+    Scan the OS temp directory for sidecar files a crashed ``CallRecorder``
+    never reached ``finish()`` to clean up, and complete each one's
+    multipart upload via ``recover_sidecar_upload()``.
+
+    This is what makes the crash-recovery guarantee in the module docstring
+    actually apply instead of being a tested-but-never-invoked building
+    block: call it once at process startup, before the session manager
+    starts accepting new calls (see ``services/pipeline/server.py::lifespan``),
+    so any recording interrupted by the previous process's crash gets
+    finalized before anything new can create fresh temp files of its own.
+
+    Never raises — one corrupt/unreadable sidecar must not block startup
+    or the recovery of any other call's recording. Returns the S3 keys of
+    everything successfully recovered.
+    """
+    recovered: list[str] = []
+    temp_dir = tempfile.gettempdir()
+
+    try:
+        sidecar_names = [
+            name for name in os.listdir(temp_dir)
+            if name.startswith("callrec_") and name.endswith(".mpu.json")
+        ]
+    except OSError as exc:
+        log.warning("call_recorder_recovery_scan_failed", error=str(exc))
+        return recovered
+
+    for name in sidecar_names:
+        sidecar_path = os.path.join(temp_dir, name)
+        try:
+            key = await recover_sidecar_upload(sidecar_path)
+        except Exception as exc:  # noqa: BLE001 — one bad sidecar must not block the rest
+            log.error(
+                "call_recorder_recovery_failed",
+                sidecar=sidecar_path,
+                error=str(exc),
+                exc_info=True,
+            )
+            continue
+
+        if key:
+            recovered.append(key)
+            log.info("call_recorder_recovered", sidecar=sidecar_path, key=key)
+        else:
+            # Corrupt/incomplete sidecar (missing bucket/key/upload_id/parts)
+            # — there's nothing left to recover from it, and leaving it in
+            # place would just fail the same way on every future startup.
+            try:
+                os.remove(sidecar_path)
+            except OSError:
+                pass
+
+    # The raw PCM spool files are no longer useful either way: a successful
+    # recovery used only the sidecar's recorded part metadata (never re-read
+    # them), and a failed one can't be retried from raw PCM alone without
+    # the sidecar's upload_id/part ETags, which are gone by this point.
+    try:
+        for name in os.listdir(temp_dir):
+            if name.startswith("callrec_") and name.endswith(".pcm"):
+                try:
+                    os.remove(os.path.join(temp_dir, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    return recovered

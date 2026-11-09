@@ -172,6 +172,82 @@ async def list_agents(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ORG SECRETS (tool-executor credentials — SQL DSNs, API keys)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Admin-only (``agents.admin.models``): these secrets are shared across every
+# agent in the org and substituted into tool executor templates at call time
+# (see services/pipeline/processors/executors.py). Values are write-only —
+# no endpoint here ever returns a secret's value, only its key name.
+#
+# Registered here, BEFORE the dynamic /agents/{agent_id} routes below: FastAPI
+# matches routes in registration order, and a static path like
+# "/agents/org-secrets" is otherwise shadowed by the earlier-registered
+# dynamic "/agents/{agent_id}" — a GET to /agents/org-secrets would silently
+# match get_agent() with agent_id="org-secrets" (and 422 on UUID validation)
+# instead of ever reaching list_org_secrets() below. This bug was only caught
+# by actually running the server and hitting the endpoint for real.
+
+OrgSecretsAdminUser = Annotated[User, require("agents.admin.models")]
+
+
+@router.put(
+    "/agents/org-secrets",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Set an org-level tool-executor secret",
+    tags=["Agents"],
+)
+async def set_org_secret(
+    body: SetOrgSecretRequest,
+    actor: OrgSecretsAdminUser,
+    org_id: OrgID,
+    db: DB,
+) -> None:
+    """
+    Store an encrypted secret for use by SQL/HTTP tool executors.
+
+    Reference it from a tool's ``executor`` config as ``{KEY}`` — the
+    decrypted value is attached to the pipeline session payload at call
+    start and never appears in ``tools_json`` or any API response.
+    """
+    svc = OrgSecretsService(db)
+    await svc.set_secret(org_id, body.key, body.value)
+
+
+@router.get(
+    "/agents/org-secrets",
+    response_model=OrgSecretListResponse,
+    summary="List org-level tool-executor secret names",
+    tags=["Agents"],
+)
+async def list_org_secrets(
+    actor: OrgSecretsAdminUser,
+    org_id: OrgID,
+    db: DB,
+) -> OrgSecretListResponse:
+    """Return configured secret *names* only — values are never returned."""
+    svc = OrgSecretsService(db)
+    keys = await svc.list_keys(org_id)
+    return OrgSecretListResponse(keys=keys)
+
+
+@router.delete(
+    "/agents/org-secrets/{key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an org-level tool-executor secret",
+    tags=["Agents"],
+)
+async def delete_org_secret(
+    key: str,
+    actor: OrgSecretsAdminUser,
+    org_id: OrgID,
+    db: DB,
+) -> None:
+    svc = OrgSecretsService(db)
+    await svc.delete_secret(org_id, key)
+
+
 @router.get(
     "/agents/{agent_id}",
     response_model=AgentResponse,
@@ -624,74 +700,6 @@ async def agent_analytics(
     """
     svc = CallLogService(db)
     return await svc.get_analytics(agent_id, org_id, period_days=days)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ORG SECRETS (tool-executor credentials — SQL DSNs, API keys)
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# Admin-only (``agents.admin.models``): these secrets are shared across every
-# agent in the org and substituted into tool executor templates at call time
-# (see services/pipeline/processors/executors.py). Values are write-only —
-# no endpoint here ever returns a secret's value, only its key name.
-
-OrgSecretsAdminUser = Annotated[User, require("agents.admin.models")]
-
-
-@router.put(
-    "/agents/org-secrets",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Set an org-level tool-executor secret",
-    tags=["Agents"],
-)
-async def set_org_secret(
-    body: SetOrgSecretRequest,
-    actor: OrgSecretsAdminUser,
-    org_id: OrgID,
-    db: DB,
-) -> None:
-    """
-    Store an encrypted secret for use by SQL/HTTP tool executors.
-
-    Reference it from a tool's ``executor`` config as ``{KEY}`` — the
-    decrypted value is attached to the pipeline session payload at call
-    start and never appears in ``tools_json`` or any API response.
-    """
-    svc = OrgSecretsService(db)
-    await svc.set_secret(org_id, body.key, body.value)
-
-
-@router.get(
-    "/agents/org-secrets",
-    response_model=OrgSecretListResponse,
-    summary="List org-level tool-executor secret names",
-    tags=["Agents"],
-)
-async def list_org_secrets(
-    actor: OrgSecretsAdminUser,
-    org_id: OrgID,
-    db: DB,
-) -> OrgSecretListResponse:
-    """Return configured secret *names* only — values are never returned."""
-    svc = OrgSecretsService(db)
-    keys = await svc.list_keys(org_id)
-    return OrgSecretListResponse(keys=keys)
-
-
-@router.delete(
-    "/agents/org-secrets/{key}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete an org-level tool-executor secret",
-    tags=["Agents"],
-)
-async def delete_org_secret(
-    key: str,
-    actor: OrgSecretsAdminUser,
-    org_id: OrgID,
-    db: DB,
-) -> None:
-    svc = OrgSecretsService(db)
-    await svc.delete_secret(org_id, key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

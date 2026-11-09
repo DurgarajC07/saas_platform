@@ -29,8 +29,11 @@ from app.modules.dashboard.schemas import (
     AgentDeepDiveResponse,
     AgentPerformanceResponse,
     AgentPerformanceRow,
+    AnalyticsBreakdownPoint,
+    AnalyticsLatencyPoint,
     CallVolumePoint,
     CallVolumeResponse,
+    DashboardAnalyticsResponse,
     GPUDeviceInfo,
     GPUStatusResponse,
     LatencyBucket,
@@ -145,6 +148,85 @@ class DashboardService:
             buckets=buckets,
             summary=summary,
             generated_at=datetime.now(UTC),
+        )
+
+    # ── Date-range analytics page ────────────────────────────────────────
+
+    async def analytics(
+        self, org_id: UUID, from_date: str, to_date: str
+    ) -> DashboardAnalyticsResponse:
+        """
+        Date-range view backing the dashboard analytics page: a combined
+        end-to-end latency time series, a per-component (STT/LLM/TTS)
+        breakdown, and overall success/failure rates.
+
+        Built from the same repository building blocks as latency_24h() and
+        call_volume() (bucketed queries against call_logs), rather than a
+        new query, to keep this consistent with the rest of the dashboard.
+        ``to_date`` is accepted and echoed back but the window always
+        extends to "now" — there is no historical upper bound in the
+        underlying queries, matching how latency_24h/call_volume already
+        work (both use an open-ended "since now" window, not [since, until]).
+        """
+        try:
+            since = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            since = datetime.now(UTC) - timedelta(days=30)
+
+        buckets_raw = await self.repo.latency_hourly_buckets(org_id, since)
+        summary_raw = await self.repo.latency_summary(org_id, since)
+
+        # Combined end-to-end latency per bucket = sum of the three
+        # pipeline stages' percentiles at that same percentile rank. This
+        # approximates total perceived latency; it is not a true percentile
+        # of the summed distribution, but is the standard, cheap way to
+        # turn three already-computed percentile series into one without
+        # re-querying raw per-call sums.
+        latency_points = [
+            AnalyticsLatencyPoint(
+                timestamp=b["label"],
+                p50=(b["p50_stt"] or 0.0) + (b["p50_llm"] or 0.0) + (b["p50_tts"] or 0.0),
+                p95=(b["p95_stt"] or 0.0) + (b["p95_llm"] or 0.0) + (b["p95_tts"] or 0.0),
+                p99=(b["p99_stt"] or 0.0) + (b["p99_llm"] or 0.0) + (b["p99_tts"] or 0.0),
+            )
+            for b in buckets_raw
+        ]
+
+        # latency_summary() only computes percentiles, not a true mean —
+        # p50 (median) is used as the "average" here rather than issuing a
+        # second aggregate query just for AVG(); close enough for a summary
+        # tile, not used for anything billing- or SLA-sensitive.
+        breakdown = [
+            AnalyticsBreakdownPoint(
+                component="STT",
+                avg_ms=summary_raw["p50_stt"] or 0.0,
+                p95_ms=summary_raw["p95_stt"] or 0.0,
+            ),
+            AnalyticsBreakdownPoint(
+                component="LLM",
+                avg_ms=summary_raw["p50_llm"] or 0.0,
+                p95_ms=summary_raw["p95_llm"] or 0.0,
+            ),
+            AnalyticsBreakdownPoint(
+                component="TTS",
+                avg_ms=summary_raw["p50_tts"] or 0.0,
+                p95_ms=summary_raw["p95_tts"] or 0.0,
+            ),
+        ]
+
+        volume_points = await self.repo.call_volume(org_id, "day", since)
+        total_calls = sum(p["total_calls"] for p in volume_points)
+        completed_calls = sum(p["completed_calls"] for p in volume_points)
+        failed_calls = sum(p["failed_calls"] for p in volume_points)
+
+        return DashboardAnalyticsResponse(
+            latency=latency_points,
+            breakdown=breakdown,
+            success_rate=self._pct(completed_calls, total_calls),
+            failure_rate=self._pct(failed_calls, total_calls),
+            total_calls=total_calls,
+            from_date=from_date,
+            to_date=to_date,
         )
 
     # ── Call volume ───────────────────────────────────────────────────────
